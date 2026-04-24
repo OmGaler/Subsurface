@@ -1,0 +1,183 @@
+:root {
+  color-scheme: light;
+  --paper: #f6f4ee;
+  --ink: #181817;
+  --muted: rgba(24, 24, 23, 0.58);
+  --card: rgba(255, 255, 255, 0.84);
+  --card-border: rgba(24, 24, 23, 0.1);
+  --shadow: 0 24px 64px rgba(28, 31, 33, 0.12);
+  font-family: "Aptos", "Segoe UI Variable", "Segoe UI", sans-serif;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#app {
+  margin: 0;
+  min-height: 100%;
+  background: var(--paper);
+  color: var(--ink);
+}
+
+body {
+  min-height: 100vh;
+  overflow: hidden;
+}
+
+.viewport,
+.scene {
+  position: relative;
+  min-height: 100vh;
+}
+
+.viewport {
+  overflow: hidden;
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.42), rgba(255, 255, 255, 0.08)),
+    var(--paper);
+}
+
+.viewport__wash,
+.viewport__contours {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+
+.viewport__wash--a {
+  background:
+    radial-gradient(circle at 18% 72%, rgba(184, 235, 240, 0.52), transparent 18%),
+    radial-gradient(circle at 82% 36%, rgba(199, 245, 250, 0.42), transparent 14%);
+  filter: blur(10px);
+}
+
+.viewport__wash--b {
+  background:
+    radial-gradient(circle at 64% 62%, rgba(180, 189, 199, 0.16), transparent 20%),
+    radial-gradient(circle at 34% 28%, rgba(180, 189, 199, 0.1), transparent 18%);
+  filter: blur(18px);
+}
+
+.viewport__contours {
+  opacity: 0.42;
+  background-image:
+    radial-gradient(circle at 30% 45%, rgba(53, 63, 72, 0.04) 0, rgba(53, 63, 72, 0.04) 2px, transparent 2px),
+    radial-gradient(circle at 70% 58%, rgba(53, 63, 72, 0.03) 0, rgba(53, 63, 72, 0.03) 2px, transparent 2px);
+  background-size: 220px 220px, 280px 280px;
+}
+
+.scene {
+  z-index: 1;
+}
+
+.scene canvas,
+.label-layer {
+  position: absolute;
+  inset: 0;
+  display: block;
+}
+
+.label-layer {
+  pointer-events: none;
+}
+
+.loading,
+.hover-card {
+  position: absolute;
+  z-index: 3;
+  border-radius: 18px;
+  backdrop-filter: blur(16px);
+  box-shadow: var(--shadow);
+}
+
+.loading {
+  top: 1rem;
+  left: 1rem;
+  padding: 0.78rem 1rem;
+  background: rgba(255, 255, 255, 0.76);
+  border: 1px solid var(--card-border);
+  color: var(--muted);
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  font-size: 0.72rem;
+}
+
+.loading--error {
+  color: #7f1d1d;
+  letter-spacing: normal;
+  text-transform: none;
+  font-size: 0.92rem;
+}
+
+.hover-card {
+  left: 1rem;
+  bottom: 1rem;
+  min-width: 230px;
+  max-width: min(360px, calc(100vw - 2rem));
+  padding: 0.95rem 1rem;
+  background: var(--card);
+  border: 1px solid var(--card-border);
+}
+
+.hover-card__eyebrow,
+.station-label {
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+}
+
+.hover-card__eyebrow {
+  margin: 0 0 0.35rem;
+  font-size: 0.68rem;
+  color: var(--muted);
+}
+
+.hover-card__title {
+  margin: 0;
+  font-size: 1.4rem;
+  line-height: 1;
+  letter-spacing: -0.04em;
+}
+
+.hover-card__meta {
+  margin: 0.45rem 0 0;
+  font-size: 0.88rem;
+  color: var(--muted);
+}
+
+.station-label {
+  color: #111111;
+  font-size: 0.7rem;
+  font-weight: 700;
+  white-space: nowrap;
+  text-shadow:
+    0 0 14px rgba(255, 255, 255, 0.95),
+    0 0 5px rgba(255, 255, 255, 0.95),
+    1px 1px 0 rgba(255, 255, 255, 0.95),
+    -1px 1px 0 rgba(255, 255, 255, 0.95),
+    1px -1px 0 rgba(255, 255, 255, 0.95),
+    -1px -1px 0 rgba(255, 255, 255, 0.95);
+}
+
+@media (max-width: 720px) {
+  .loading,
+  .hover-card {
+    left: 0.75rem;
+  }
+
+  .loading {
+    top: 0.75rem;
+  }
+
+  .hover-card {
+    right: 0.75rem;
+    bottom: 0.75rem;
+    max-width: none;
+  }
+
+  .hover-card__title {
+    font-size: 1.15rem;
+  }
+}
