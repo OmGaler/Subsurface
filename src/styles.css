@@ -1,11 +1,11 @@
 :root {
   color-scheme: light;
-  --paper: #f6f4ee;
+  --paper: #f7f7f4;
   --ink: #181817;
   --muted: rgba(24, 24, 23, 0.58);
-  --card: rgba(255, 255, 255, 0.84);
+  --card: rgba(255, 255, 255, 0.9);
   --card-border: rgba(24, 24, 23, 0.1);
-  --shadow: 0 24px 64px rgba(28, 31, 33, 0.12);
+  --shadow: 0 16px 42px rgba(28, 31, 33, 0.13);
   font-family: "Aptos", "Segoe UI Variable", "Segoe UI", sans-serif;
 }
 
@@ -36,7 +36,7 @@ body {
 .viewport {
   overflow: hidden;
   background:
-    linear-gradient(180deg, rgba(255, 255, 255, 0.42), rgba(255, 255, 255, 0.08)),
+    linear-gradient(180deg, rgba(255, 255, 255, 0.58), rgba(255, 255, 255, 0.05)),
     var(--paper);
 }
 
@@ -49,24 +49,23 @@ body {
 
 .viewport__wash--a {
   background:
-    radial-gradient(circle at 18% 72%, rgba(184, 235, 240, 0.52), transparent 18%),
-    radial-gradient(circle at 82% 36%, rgba(199, 245, 250, 0.42), transparent 14%);
-  filter: blur(10px);
+    linear-gradient(115deg, transparent 0 30%, rgba(185, 236, 239, 0.22) 30% 36%, transparent 36% 100%),
+    linear-gradient(24deg, transparent 0 57%, rgba(185, 236, 239, 0.16) 57% 61%, transparent 61% 100%);
+  filter: blur(4px);
 }
 
 .viewport__wash--b {
   background:
-    radial-gradient(circle at 64% 62%, rgba(180, 189, 199, 0.16), transparent 20%),
-    radial-gradient(circle at 34% 28%, rgba(180, 189, 199, 0.1), transparent 18%);
-  filter: blur(18px);
+    repeating-linear-gradient(165deg, transparent 0 118px, rgba(74, 80, 86, 0.035) 118px 121px, transparent 121px 238px);
+  filter: blur(1px);
 }
 
 .viewport__contours {
-  opacity: 0.42;
+  opacity: 0.34;
   background-image:
-    radial-gradient(circle at 30% 45%, rgba(53, 63, 72, 0.04) 0, rgba(53, 63, 72, 0.04) 2px, transparent 2px),
-    radial-gradient(circle at 70% 58%, rgba(53, 63, 72, 0.03) 0, rgba(53, 63, 72, 0.03) 2px, transparent 2px);
-  background-size: 220px 220px, 280px 280px;
+    linear-gradient(90deg, rgba(53, 63, 72, 0.025) 1px, transparent 1px),
+    linear-gradient(0deg, rgba(53, 63, 72, 0.018) 1px, transparent 1px);
+  background-size: 96px 96px, 96px 96px;
 }
 
 .scene {
@@ -88,7 +87,7 @@ body {
 .hover-card {
   position: absolute;
   z-index: 3;
-  border-radius: 18px;
+  border-radius: 8px;
   backdrop-filter: blur(16px);
   box-shadow: var(--shadow);
 }
@@ -115,15 +114,14 @@ body {
 .hover-card {
   left: 1rem;
   bottom: 1rem;
-  min-width: 230px;
-  max-width: min(360px, calc(100vw - 2rem));
-  padding: 0.95rem 1rem;
+  min-width: 210px;
+  max-width: min(320px, calc(100vw - 2rem));
+  padding: 0.8rem 0.9rem;
   background: var(--card);
   border: 1px solid var(--card-border);
 }
 
-.hover-card__eyebrow,
-.station-label {
+.hover-card__eyebrow {
   letter-spacing: 0.16em;
   text-transform: uppercase;
 }
@@ -136,9 +134,9 @@ body {
 
 .hover-card__title {
   margin: 0;
-  font-size: 1.4rem;
+  font-size: 1.18rem;
   line-height: 1;
-  letter-spacing: -0.04em;
+  letter-spacing: 0;
 }
 
 .hover-card__meta {
@@ -149,19 +147,25 @@ body {
 
 .station-label {
   color: #111111;
-  font-size: 0.7rem;
+  font-size: 0.78rem;
   font-weight: 700;
+  letter-spacing: 0;
   white-space: nowrap;
+  transform: translate(-50%, -100%);
   text-shadow:
-    0 0 14px rgba(255, 255, 255, 0.95),
-    0 0 5px rgba(255, 255, 255, 0.95),
-    1px 1px 0 rgba(255, 255, 255, 0.95),
-    -1px 1px 0 rgba(255, 255, 255, 0.95),
-    1px -1px 0 rgba(255, 255, 255, 0.95),
-    -1px -1px 0 rgba(255, 255, 255, 0.95);
+    0 0 10px rgba(255, 255, 255, 1),
+    0 0 4px rgba(255, 255, 255, 1),
+    1px 1px 0 rgba(255, 255, 255, 1),
+    -1px 1px 0 rgba(255, 255, 255, 1),
+    1px -1px 0 rgba(255, 255, 255, 1),
+    -1px -1px 0 rgba(255, 255, 255, 1);
 }
 
 @media (max-width: 720px) {
+  .station-label {
+    display: none;
+  }
+
   .loading,
   .hover-card {
     left: 0.75rem;

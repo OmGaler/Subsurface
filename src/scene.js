@@ -4,13 +4,16 @@ import { CSS2DObject, CSS2DRenderer } from 'three/examples/jsm/renderers/CSS2DRe
 
 const HORIZONTAL_SCALE = 0.058;
 const VERTICAL_SCALE = 4.6;
-const LINE_RADIUS = 8.8;
+const LINE_RADIUS = 9.8;
+const LABEL_LIMIT = 6;
+const MIN_LABEL_DISTANCE = 360;
+let stationTexture = null;
 
 function hexToColor(value) {
   return new THREE.Color(value);
 }
 
-function darkenColour(value, amount) {
+function darkenColour(value, amount = 0.42) {
   const colour = hexToColor(value);
   colour.multiplyScalar(amount);
   return colour;
@@ -61,7 +64,7 @@ function dedupePoints(points) {
   return deduped;
 }
 
-function makeTubeMesh(points, colour, radius) {
+function makeTubeMesh(points, colour, radius, options = {}) {
   const dedupedPoints = dedupePoints(points);
 
   if (dedupedPoints.length < 2) {
@@ -78,13 +81,15 @@ function makeTubeMesh(points, colour, radius) {
     curvePath,
     Math.max(24, dedupedPoints.length * 3),
     radius,
-    10,
+    options.radialSegments ?? 12,
     false
   );
   const material = new THREE.MeshStandardMaterial({
     color: colour,
-    roughness: 0.72,
-    metalness: 0.02
+    emissive: options.emissive ?? '#000000',
+    emissiveIntensity: options.emissiveIntensity ?? 0,
+    roughness: options.roughness ?? 0.64,
+    metalness: options.metalness ?? 0.02
   });
 
   return new THREE.Mesh(geometry, material);
@@ -94,43 +99,102 @@ function lineRadiusFor(lineId) {
   return lineId === 'waterloo-city' ? LINE_RADIUS * 0.82 : LINE_RADIUS;
 }
 
+function getStationTexture() {
+  if (stationTexture) {
+    return stationTexture;
+  }
+
+  const canvas = document.createElement('canvas');
+  canvas.width = 128;
+  canvas.height = 128;
+  const context = canvas.getContext('2d');
+
+  context.clearRect(0, 0, canvas.width, canvas.height);
+  context.beginPath();
+  context.arc(64, 64, 50, 0, Math.PI * 2);
+  context.fillStyle = '#2d2a27';
+  context.fill();
+  context.beginPath();
+  context.arc(64, 64, 42, 0, Math.PI * 2);
+  context.fillStyle = '#d9d5cf';
+  context.fill();
+  context.beginPath();
+  context.arc(58, 56, 33, 0, Math.PI * 2);
+  context.fillStyle = '#fffdf9';
+  context.fill();
+
+  stationTexture = new THREE.CanvasTexture(canvas);
+  stationTexture.colorSpace = THREE.SRGBColorSpace;
+
+  return stationTexture;
+}
+
 function makeStationNode(node, project) {
   const anchor = new THREE.Group();
   const position = project(node.coordinates, node.elevation);
   anchor.position.copy(position);
 
-  const outer = new THREE.Mesh(
-    new THREE.SphereGeometry(7.2, 24, 24),
-    new THREE.MeshStandardMaterial({
-      color: '#d8d2ca',
-      roughness: 0.9
+  const sprite = new THREE.Sprite(
+    new THREE.SpriteMaterial({
+      map: getStationTexture(),
+      transparent: true,
+      depthTest: true,
+      depthWrite: false
     })
   );
-  const inner = new THREE.Mesh(
-    new THREE.SphereGeometry(5.8, 24, 24),
-    new THREE.MeshStandardMaterial({
-      color: '#fffdf9',
-      roughness: 0.95
-    })
-  );
+  sprite.scale.set(34, 34, 1);
 
-  anchor.add(outer);
-  anchor.add(inner);
-  anchor.userData = { type: 'station', node, outer, inner };
+  anchor.add(sprite);
+  anchor.userData = { type: 'station', node, sprite };
 
   return anchor;
 }
 
 function makeConnector(start, end) {
-  const points = [start, end];
-  const geometry = new THREE.BufferGeometry().setFromPoints(points);
-  const material = new THREE.LineBasicMaterial({
-    color: '#8e8b86',
-    transparent: true,
-    opacity: 0.9
-  });
+  const direction = end.clone().sub(start);
+  const length = direction.length();
 
-  return new THREE.Line(geometry, material);
+  if (length < 1) {
+    return null;
+  }
+
+  const geometry = new THREE.CylinderGeometry(1.35, 1.35, length, 8);
+  const material = new THREE.MeshStandardMaterial({
+    color: '#4a4640',
+    roughness: 0.7
+  });
+  const connector = new THREE.Mesh(geometry, material);
+  const midpoint = start.clone().add(end).multiplyScalar(0.5);
+
+  connector.position.copy(midpoint);
+  connector.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), direction.normalize());
+
+  return connector;
+}
+
+function selectLabelGroups(stationGroups, project) {
+  const selected = [];
+
+  stationGroups
+    .filter((group) => group.nodes.length > 1)
+    .slice()
+    .sort((left, right) => right.importance - left.importance)
+    .forEach((group) => {
+      if (selected.length >= LABEL_LIMIT) {
+        return;
+      }
+
+      const meanElevation =
+        group.nodes.reduce((sum, node) => sum + node.elevation, 0) / Math.max(1, group.nodes.length);
+      const position = project(group.coordinates, meanElevation);
+      const isTooClose = selected.some((item) => item.position.distanceTo(position) < MIN_LABEL_DISTANCE);
+
+      if (!isTooClose) {
+        selected.push({ group, position });
+      }
+    });
+
+  return selected;
 }
 
 function fitCamera(camera, controls, points, width, height) {
@@ -141,8 +205,9 @@ function fitCamera(camera, controls, points, width, height) {
   const fovRadians = (camera.fov * Math.PI) / 180;
   const fitHeightDistance = (size.y * 0.85 + size.z * 0.52) / Math.tan(fovRadians / 2);
   const fitWidthDistance = (size.x * 0.78) / Math.tan(fovRadians / 2) / Math.max(aspect, 0.7);
-  const distance = Math.max(fitHeightDistance, fitWidthDistance, 780) * 0.58;
-  const offset = new THREE.Vector3(-0.82, 0.78, 1.05)
+  const responsiveScale = aspect < 0.75 ? 2.45 : 0.64;
+  const distance = Math.max(fitHeightDistance, fitWidthDistance, 780) * responsiveScale;
+  const offset = new THREE.Vector3(-0.72, 0.66, 1.12)
     .normalize()
     .multiplyScalar(distance);
 
@@ -164,7 +229,7 @@ function makeLabel(group, project) {
   const meanElevation =
     group.nodes.reduce((sum, node) => sum + node.elevation, 0) / Math.max(1, group.nodes.length);
   const position = project(group.coordinates, meanElevation);
-  position.y += 18;
+  position.y += 25;
   object.position.copy(position);
 
   return object;
@@ -235,7 +300,7 @@ export function createScene(container, networkData, options = {}) {
   controls.enableDamping = true;
   controls.enablePan = true;
   controls.minDistance = 420;
-  controls.maxDistance = 6500;
+  controls.maxDistance = 18000;
   controls.minPolarAngle = 0.68;
   controls.maxPolarAngle = 1.24;
   controls.target.set(0, 120, 0);
@@ -249,15 +314,19 @@ export function createScene(container, networkData, options = {}) {
     { passive: true }
   );
 
-  scene.add(new THREE.AmbientLight('#ffffff', 1.55));
+  scene.add(new THREE.AmbientLight('#ffffff', 1.22));
 
-  const keyLight = new THREE.DirectionalLight('#fff8ef', 1.15);
+  const keyLight = new THREE.DirectionalLight('#ffffff', 1.35);
   keyLight.position.set(-900, 1800, 1200);
   scene.add(keyLight);
 
-  const fillLight = new THREE.DirectionalLight('#d8f7ff', 0.55);
+  const fillLight = new THREE.DirectionalLight('#f8fbff', 0.8);
   fillLight.position.set(1400, 900, -1200);
   scene.add(fillLight);
+
+  const rimLight = new THREE.DirectionalLight('#ffffff', 0.52);
+  rimLight.position.set(0, 1600, -1600);
+  scene.add(rimLight);
 
   const interactiveObjects = [];
   const scenePoints = [];
@@ -266,7 +335,13 @@ export function createScene(container, networkData, options = {}) {
     const points = tubePoints(segment, project);
     scenePoints.push(...points);
     const radius = lineRadiusFor(segment.lineId);
-    const lineMesh = makeTubeMesh(points, segment.colour, radius);
+    const underlayMesh = makeTubeMesh(points, darkenColour(segment.colour), radius + 2.2, {
+      roughness: 0.78
+    });
+    const lineMesh = makeTubeMesh(points, segment.colour, radius, {
+      emissive: segment.colour,
+      emissiveIntensity: 0.05
+    });
 
     if (!lineMesh) {
       return;
@@ -278,6 +353,10 @@ export function createScene(container, networkData, options = {}) {
       material: lineMesh.material,
       baseColour: hexToColor(segment.colour).clone()
     };
+
+    if (underlayMesh) {
+      scene.add(underlayMesh);
+    }
 
     interactiveObjects.push(lineMesh);
     scene.add(lineMesh);
@@ -291,7 +370,11 @@ export function createScene(container, networkData, options = {}) {
     for (let index = 0; index < group.nodes.length - 1; index += 1) {
       const start = project(group.nodes[index].coordinates, group.nodes[index].elevation);
       const end = project(group.nodes[index + 1].coordinates, group.nodes[index + 1].elevation);
-      scene.add(makeConnector(start, end));
+      const connector = makeConnector(start, end);
+
+      if (connector) {
+        scene.add(connector);
+      }
     }
   });
 
@@ -300,6 +383,10 @@ export function createScene(container, networkData, options = {}) {
     scenePoints.push(stationAnchor.position.clone());
     interactiveObjects.push(stationAnchor);
     scene.add(stationAnchor);
+  });
+
+  selectLabelGroups(networkData.scene.stationGroups, project).forEach(({ group }) => {
+    scene.add(makeLabel(group, project));
   });
 
   fitCamera(camera, controls, scenePoints, container.clientWidth, container.clientHeight);
