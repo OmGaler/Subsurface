@@ -4,9 +4,11 @@ import { CSS2DObject, CSS2DRenderer } from 'three/examples/jsm/renderers/CSS2DRe
 
 const HORIZONTAL_SCALE = 0.058;
 const VERTICAL_SCALE = 4.6;
-const LINE_RADIUS = 9.8;
-const LABEL_LIMIT = 6;
-const MIN_LABEL_DISTANCE = 360;
+const LINE_RADIUS = 12.4;
+const DESKTOP_LABEL_LIMIT = 76;
+const MIN_LABEL_DISTANCE = 160;
+const SHARED_ROUTE_STRIPE_LENGTH = 46;
+const SHARED_SECTION_HIDE_DISTANCE = 44;
 let stationTexture = null;
 
 function hexToColor(value) {
@@ -19,7 +21,23 @@ function darkenColour(value, amount = 0.42) {
   return colour;
 }
 
-function computeProjection(sceneData) {
+function applyViewState(camera, controls, viewState) {
+  if (!viewState) {
+    return;
+  }
+
+  camera.position.fromArray(viewState.position);
+  controls.target.fromArray(viewState.target);
+  camera.zoom = viewState.zoom;
+  camera.updateProjectionMatrix();
+  controls.update();
+}
+
+export function computeProjection(sceneData, options = {}) {
+  const {
+    horizontalScale = HORIZONTAL_SCALE,
+    verticalScale = VERTICAL_SCALE
+  } = options;
   const coordinates = [];
   const elevations = [];
 
@@ -40,14 +58,93 @@ function computeProjection(sceneData) {
 
   return ([lon, lat], elevation = 0) =>
     new THREE.Vector3(
-      (lon - centreLon) * 111320 * cosine * HORIZONTAL_SCALE,
-      (elevation + elevationOffset) * VERTICAL_SCALE,
-      -(lat - centreLat) * 110540 * HORIZONTAL_SCALE
+      (lon - centreLon) * 111320 * cosine * horizontalScale,
+      (elevation + elevationOffset) * verticalScale,
+      -(lat - centreLat) * 110540 * horizontalScale
     );
 }
 
 function tubePoints(segment, project) {
   return segment.coordinates.map(([lon, lat, elevation]) => project([lon, lat], elevation));
+}
+
+function pointToSegmentDistanceSquared(point, start, end) {
+  const spanX = end.x - start.x;
+  const spanZ = end.z - start.z;
+  const spanLengthSquared = spanX * spanX + spanZ * spanZ;
+
+  if (spanLengthSquared === 0) {
+    const dx = point.x - start.x;
+    const dz = point.z - start.z;
+
+    return { distanceSquared: dx * dx + dz * dz, t: 0 };
+  }
+
+  const t = Math.max(
+    0,
+    Math.min(1, ((point.x - start.x) * spanX + (point.z - start.z) * spanZ) / spanLengthSquared)
+  );
+  const closestX = start.x + spanX * t;
+  const closestZ = start.z + spanZ * t;
+  const dx = point.x - closestX;
+  const dz = point.z - closestZ;
+
+  return { distanceSquared: dx * dx + dz * dz, t };
+}
+
+function isSharedSectionEdge(segment, start, end, sharedSections, project) {
+  const projectedStart = project(start, start[2]);
+  const projectedEnd = project(end, end[2]);
+  const midpoint = projectedStart.clone().add(projectedEnd).multiplyScalar(0.5);
+  const maxDistanceSquared = SHARED_SECTION_HIDE_DISTANCE * SHARED_SECTION_HIDE_DISTANCE;
+
+  return sharedSections.some((section) => {
+    if (!section.lineIds?.includes(segment.lineId)) {
+      return false;
+    }
+
+    const [sectionStart, sectionEnd] = section.coordinates;
+    const projectedSectionStart = project(sectionStart, sectionStart[2]);
+    const projectedSectionEnd = project(sectionEnd, sectionEnd[2]);
+    const match = pointToSegmentDistanceSquared(
+      midpoint,
+      projectedSectionStart,
+      projectedSectionEnd
+    );
+
+    return match.t > 0.02 && match.t < 0.98 && match.distanceSquared <= maxDistanceSquared;
+  });
+}
+
+export function visibleCoordinateRuns(segment, sharedSections, project) {
+  const runs = [];
+  let currentRun = [];
+
+  segment.coordinates.forEach((coordinate, index) => {
+    if (index === 0) {
+      currentRun.push(coordinate);
+      return;
+    }
+
+    const previous = segment.coordinates[index - 1];
+
+    if (isSharedSectionEdge(segment, previous, coordinate, sharedSections, project)) {
+      if (currentRun.length > 1) {
+        runs.push(currentRun);
+      }
+
+      currentRun = [coordinate];
+      return;
+    }
+
+    currentRun.push(coordinate);
+  });
+
+  if (currentRun.length > 1) {
+    runs.push(currentRun);
+  }
+
+  return runs;
 }
 
 function dedupePoints(points) {
@@ -81,19 +178,154 @@ function makeTubeMesh(points, colour, radius, options = {}) {
     curvePath,
     Math.max(24, dedupedPoints.length * 3),
     radius,
-    options.radialSegments ?? 12,
+    options.radialSegments ?? 16,
     false
   );
   const material = new THREE.MeshStandardMaterial({
     color: colour,
     emissive: options.emissive ?? '#000000',
     emissiveIntensity: options.emissiveIntensity ?? 0,
-    roughness: options.roughness ?? 0.64,
-    metalness: options.metalness ?? 0.02
+    roughness: options.roughness ?? 0.42,
+    metalness: options.metalness ?? 0.04
   });
 
   return new THREE.Mesh(geometry, material);
 }
+
+function makeCylinderBetween(start, end, radius, colour, options = {}) {
+  const direction = end.clone().sub(start);
+  const length = direction.length();
+
+  if (length < 1) {
+    return null;
+  }
+
+  const geometry = new THREE.CylinderGeometry(radius, radius, length, options.radialSegments ?? 16);
+  const material = new THREE.MeshStandardMaterial({
+    color: colour,
+    emissive: options.emissive ?? colour,
+    emissiveIntensity: options.emissiveIntensity ?? 0.03,
+    roughness: options.roughness ?? 0.34,
+    metalness: options.metalness ?? 0.04
+  });
+  const mesh = new THREE.Mesh(geometry, material);
+  const midpoint = start.clone().add(end).multiplyScalar(0.5);
+
+  mesh.position.copy(midpoint);
+  mesh.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), direction.normalize());
+  mesh.renderOrder = options.renderOrder ?? 12;
+
+  return mesh;
+}
+
+function roundedCoordinateKey([lon, lat, elevation = 0]) {
+  return `${lon.toFixed(5)},${lat.toFixed(5)},${elevation.toFixed(1)}`;
+}
+
+function sharedRouteEdgeKey(start, end) {
+  const keys = [roundedCoordinateKey(start), roundedCoordinateKey(end)].sort();
+
+  return keys.join('|');
+}
+
+export function collectSharedRouteEdges(lineSegments) {
+  const edgesByKey = new Map();
+
+  lineSegments.forEach((segment) => {
+    segment.coordinates.forEach((coordinate, index) => {
+      if (index === segment.coordinates.length - 1) {
+        return;
+      }
+
+      const next = segment.coordinates[index + 1];
+      const key = sharedRouteEdgeKey(coordinate, next);
+      const edge = edgesByKey.get(key) ?? {
+        start: coordinate,
+        end: next,
+        lines: new Map()
+      };
+
+      edge.lines.set(segment.lineId, segment.colour);
+      edgesByKey.set(key, edge);
+    });
+  });
+
+  return Array.from(edgesByKey.values()).filter((edge) => edge.lines.size > 1);
+}
+
+function makeStripedRouteOverlay(edge, project) {
+  const start = project(edge.start, edge.start[2]);
+  const end = project(edge.end, edge.end[2]);
+  const direction = end.clone().sub(start);
+  const length = direction.length();
+
+  if (length < 1) {
+    return [];
+  }
+
+  const colours = Array.from(edge.lines.entries())
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([, colour]) => colour);
+  const stripeCount = Math.max(colours.length, Math.ceil(length / SHARED_ROUTE_STRIPE_LENGTH));
+  const meshes = [];
+
+  for (let index = 0; index < stripeCount; index += 1) {
+    const from = index / stripeCount;
+    const to = (index + 1) / stripeCount;
+    const segmentStart = start.clone().lerp(end, from);
+    const segmentEnd = start.clone().lerp(end, to);
+    const mesh = makeCylinderBetween(
+      segmentStart,
+      segmentEnd,
+      LINE_RADIUS + 1.1,
+      colours[index % colours.length],
+      { renderOrder: 16 }
+    );
+
+    if (mesh) {
+      meshes.push(mesh);
+    }
+  }
+
+  return meshes;
+}
+
+function makeStripedSharedSectionOverlay(section, project) {
+  const [startCoordinate, endCoordinate] = section.coordinates;
+  const start = project(startCoordinate, startCoordinate[2]);
+  const end = project(endCoordinate, endCoordinate[2]);
+  const direction = end.clone().sub(start);
+  const length = direction.length();
+
+  if (length < 1) {
+    return [];
+  }
+
+  const colours = section.lines.map((line) => line.colour);
+  const stripeCount = Math.max(colours.length, Math.ceil(length / SHARED_ROUTE_STRIPE_LENGTH));
+  const meshes = [];
+
+  for (let index = 0; index < stripeCount; index += 1) {
+    const from = index / stripeCount;
+    const to = (index + 1) / stripeCount;
+    const segmentStart = start.clone().lerp(end, from);
+    const segmentEnd = start.clone().lerp(end, to);
+    const mesh = makeCylinderBetween(
+      segmentStart,
+      segmentEnd,
+      LINE_RADIUS + 1.1,
+      colours[index % colours.length],
+      { renderOrder: 18 }
+    );
+
+    if (mesh) {
+      meshes.push(mesh);
+    }
+  }
+
+  return meshes;
+}
+
 
 function lineRadiusFor(lineId) {
   return lineId === 'waterloo-city' ? LINE_RADIUS * 0.82 : LINE_RADIUS;
@@ -112,15 +344,15 @@ function getStationTexture() {
   context.clearRect(0, 0, canvas.width, canvas.height);
   context.beginPath();
   context.arc(64, 64, 50, 0, Math.PI * 2);
-  context.fillStyle = '#2d2a27';
+  context.fillStyle = 'rgba(20, 21, 21, 0.88)';
   context.fill();
   context.beginPath();
-  context.arc(64, 64, 42, 0, Math.PI * 2);
-  context.fillStyle = '#d9d5cf';
+  context.arc(64, 64, 40, 0, Math.PI * 2);
+  context.fillStyle = '#fffdf8';
   context.fill();
   context.beginPath();
-  context.arc(58, 56, 33, 0, Math.PI * 2);
-  context.fillStyle = '#fffdf9';
+  context.arc(50, 48, 14, 0, Math.PI * 2);
+  context.fillStyle = 'rgba(255, 255, 255, 0.72)';
   context.fill();
 
   stationTexture = new THREE.CanvasTexture(canvas);
@@ -138,11 +370,12 @@ function makeStationNode(node, project) {
     new THREE.SpriteMaterial({
       map: getStationTexture(),
       transparent: true,
-      depthTest: true,
+      depthTest: false,
       depthWrite: false
     })
   );
-  sprite.scale.set(34, 34, 1);
+  sprite.renderOrder = 40;
+  sprite.scale.set(22, 22, 1);
 
   anchor.add(sprite);
   anchor.userData = { type: 'station', node, sprite };
@@ -160,8 +393,9 @@ function makeConnector(start, end) {
 
   const geometry = new THREE.CylinderGeometry(1.35, 1.35, length, 8);
   const material = new THREE.MeshStandardMaterial({
-    color: '#4a4640',
-    roughness: 0.7
+    color: '#3f4240',
+    roughness: 0.48,
+    metalness: 0.08
   });
   const connector = new THREE.Mesh(geometry, material);
   const midpoint = start.clone().add(end).multiplyScalar(0.5);
@@ -172,15 +406,14 @@ function makeConnector(start, end) {
   return connector;
 }
 
-function selectLabelGroups(stationGroups, project) {
+export function selectLabelGroups(stationGroups, project, labelLimit = DESKTOP_LABEL_LIMIT) {
   const selected = [];
 
   stationGroups
-    .filter((group) => group.nodes.length > 1)
     .slice()
     .sort((left, right) => right.importance - left.importance)
     .forEach((group) => {
-      if (selected.length >= LABEL_LIMIT) {
+      if (selected.length >= labelLimit) {
         return;
       }
 
@@ -224,6 +457,7 @@ function makeLabel(group, project) {
   const label = document.createElement('div');
   label.className = 'station-label';
   label.textContent = group.name;
+  label.dataset.stationName = group.name;
 
   const object = new CSS2DObject(label);
   const meanElevation =
@@ -266,11 +500,11 @@ function hoverLineMarkup(line) {
 }
 
 export function createScene(container, networkData, options = {}) {
-  const { hoverEl, onReady } = options;
-  const project = computeProjection(networkData.scene);
+  const { hoverEl, onReady, distortion = {}, initialViewState = null } = options;
+  const project = computeProjection(networkData.scene, distortion);
 
   const scene = new THREE.Scene();
-  scene.background = new THREE.Color('#f6f4ee');
+  scene.background = null;
 
   const camera = new THREE.PerspectiveCamera(
     26,
@@ -331,35 +565,54 @@ export function createScene(container, networkData, options = {}) {
   const interactiveObjects = [];
   const scenePoints = [];
 
+  const sharedTrackSections = networkData.scene.sharedTrackSections ?? [];
+
   networkData.scene.lineSegments.forEach((segment) => {
-    const points = tubePoints(segment, project);
-    scenePoints.push(...points);
+    const coordinateRuns = visibleCoordinateRuns(segment, sharedTrackSections, project);
     const radius = lineRadiusFor(segment.lineId);
-    const underlayMesh = makeTubeMesh(points, darkenColour(segment.colour), radius + 2.2, {
-      roughness: 0.78
+
+    coordinateRuns.forEach((coordinates) => {
+      const points = coordinates.map(([lon, lat, elevation]) => project([lon, lat], elevation));
+      scenePoints.push(...points);
+      const underlayMesh = makeTubeMesh(points, darkenColour(segment.colour, 0.28), radius + 3.4, {
+        roughness: 0.56
+      });
+      const lineMesh = makeTubeMesh(points, segment.colour, radius, {
+        emissive: segment.colour,
+        emissiveIntensity: 0.04,
+        roughness: 0.36
+      });
+
+      if (!lineMesh) {
+        return;
+      }
+
+      lineMesh.userData = {
+        type: 'line',
+        line: segment,
+        material: lineMesh.material,
+        baseColour: hexToColor(segment.colour).clone()
+      };
+
+      if (underlayMesh) {
+        scene.add(underlayMesh);
+      }
+
+      interactiveObjects.push(lineMesh);
+      scene.add(lineMesh);
     });
-    const lineMesh = makeTubeMesh(points, segment.colour, radius, {
-      emissive: segment.colour,
-      emissiveIntensity: 0.05
+  });
+
+  collectSharedRouteEdges(networkData.scene.lineSegments).forEach((edge) => {
+    makeStripedRouteOverlay(edge, project).forEach((mesh) => {
+      scene.add(mesh);
     });
+  });
 
-    if (!lineMesh) {
-      return;
-    }
-
-    lineMesh.userData = {
-      type: 'line',
-      line: segment,
-      material: lineMesh.material,
-      baseColour: hexToColor(segment.colour).clone()
-    };
-
-    if (underlayMesh) {
-      scene.add(underlayMesh);
-    }
-
-    interactiveObjects.push(lineMesh);
-    scene.add(lineMesh);
+  sharedTrackSections.forEach((section) => {
+    makeStripedSharedSectionOverlay(section, project).forEach((mesh) => {
+      scene.add(mesh);
+    });
   });
 
   networkData.scene.stationGroups.forEach((group) => {
@@ -385,11 +638,12 @@ export function createScene(container, networkData, options = {}) {
     scene.add(stationAnchor);
   });
 
-  selectLabelGroups(networkData.scene.stationGroups, project).forEach(({ group }) => {
+  networkData.scene.stationGroups.forEach((group) => {
     scene.add(makeLabel(group, project));
   });
 
   fitCamera(camera, controls, scenePoints, container.clientWidth, container.clientHeight);
+  applyViewState(camera, controls, initialViewState);
 
   const raycaster = new THREE.Raycaster();
   const pointer = new THREE.Vector2();
@@ -496,6 +750,13 @@ export function createScene(container, networkData, options = {}) {
       controls.dispose();
       renderer.dispose();
       container.innerHTML = '';
+    },
+    getViewState() {
+      return {
+        position: camera.position.toArray(),
+        target: controls.target.toArray(),
+        zoom: camera.zoom
+      };
     }
   };
 }

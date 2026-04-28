@@ -1,11 +1,11 @@
 import { describe, expect, it } from 'vitest';
-import { fetchNetworkData, normaliseRouteSequence } from './tfl.js';
+import { fetchNetworkData, getStationDepthRecord, normaliseRouteSequence } from './tfl.js';
 
 function createStorage(initialValue) {
   const values = new Map();
 
   if (initialValue) {
-    values.set('subsurface.network.v4', JSON.stringify(initialValue));
+    values.set('subsurface.network.v8', JSON.stringify(initialValue));
   }
 
   return {
@@ -24,6 +24,24 @@ function createJsonResponse(data) {
     async json() {
       return data;
     }
+  };
+}
+
+function createRenderableScene() {
+  return {
+    lineSegments: [
+      {
+        coordinates: [[-0.1, 51.5, -10]]
+      }
+    ],
+    stationNodes: [
+      {
+        stationId: 'A',
+        coordinates: [-0.1, 51.5],
+        elevation: -10
+      }
+    ],
+    stationGroups: []
   };
 }
 
@@ -171,6 +189,7 @@ describe('fetchNetworkData', () => {
     const cachedData = {
       lines: { type: 'FeatureCollection', features: [] },
       stations: { type: 'FeatureCollection', features: [] },
+      scene: createRenderableScene(),
       lineCount: 12,
       stationCount: 272
     };
@@ -198,6 +217,7 @@ describe('fetchNetworkData', () => {
     const cachedData = {
       lines: { type: 'FeatureCollection', features: [] },
       stations: { type: 'FeatureCollection', features: [] },
+      scene: createRenderableScene(),
       lineCount: 12,
       stationCount: 270
     };
@@ -222,7 +242,7 @@ describe('fetchNetworkData', () => {
     const storage = createStorage();
     const calls = [];
     const lineMeta = [
-      { id: 'victoria', name: 'Victoria', modeName: 'tube' },
+      { id: 'bakerloo', name: 'Bakerloo', modeName: 'tube' },
       { id: 'elizabeth', name: 'Elizabeth line', modeName: 'elizabeth-line' }
     ];
     const routeSequence = {
@@ -231,12 +251,12 @@ describe('fetchNetworkData', () => {
         {
           stationId: 'A',
           id: 'A',
-          name: 'Alpha',
+          name: 'Waterloo Underground Station',
           lat: 51.5,
           lon: -0.1,
           zone: '1',
           modes: ['tube'],
-          lines: [{ id: 'victoria' }]
+          lines: [{ id: 'bakerloo' }]
         }
       ]
     };
@@ -260,24 +280,24 @@ describe('fetchNetworkData', () => {
     expect(result.stationCount).toBe(1);
     expect(calls).toHaveLength(3);
     expect(result.scene.lineSegments[0].coordinates[0]).toHaveLength(3);
-    expect(storage.getItem('subsurface.network.v4')).toContain('"cachedAt":5000');
+    expect(storage.getItem('subsurface.network.v8')).toContain('"cachedAt":5000');
   });
 
   it('snaps stations onto the nearest served line geometry', async () => {
     const storage = createStorage();
-    const lineMeta = [{ id: 'victoria', name: 'Victoria', modeName: 'tube' }];
+    const lineMeta = [{ id: 'bakerloo', name: 'Bakerloo', modeName: 'tube' }];
     const routeSequence = {
       lineStrings: ['[[[-0.1,51.5],[-0.1,51.52]]]'],
       stations: [
         {
           stationId: 'A',
           id: 'A',
-          name: 'Alpha',
+          name: 'Waterloo Underground Station',
           lat: 51.51,
           lon: -0.102,
           zone: '1',
           modes: ['tube'],
-          lines: [{ id: 'victoria' }]
+          lines: [{ id: 'bakerloo' }]
         }
       ]
     };
@@ -296,5 +316,133 @@ describe('fetchNetworkData', () => {
 
     expect(result.stations.features[0].geometry.coordinates[0]).toBeCloseTo(-0.1, 8);
     expect(result.stations.features[0].geometry.coordinates[1]).toBeCloseTo(51.51, 8);
+  });
+});
+
+describe('station depth data', () => {
+  it('uses TfL FOI platform heights for Waterloo line ordering', () => {
+    const bakerloo = getStationDepthRecord('Waterloo', 'bakerloo');
+    const jubilee = getStationDepthRecord('Waterloo', 'jubilee');
+    const northern = getStationDepthRecord('Waterloo', 'northern');
+    const waterlooCity = getStationDepthRecord('Waterloo', 'waterloo-city');
+
+    expect(waterlooCity.platformHeightMetres).toBeCloseTo(-1.8, 1);
+    expect(waterlooCity.platformHeightMetres).toBeGreaterThan(bakerloo.platformHeightMetres);
+    expect(waterlooCity.platformHeightMetres).toBeGreaterThan(northern.platformHeightMetres);
+    expect(waterlooCity.platformHeightMetres).toBeGreaterThan(jubilee.platformHeightMetres);
+  });
+
+  it('uses same-station subsurface platform rows for Circle line levels', () => {
+    const circle = getStationDepthRecord('Baker Street', 'circle');
+    const hammersmithCity = getStationDepthRecord('Baker Street', 'hammersmith-city');
+    const metropolitan = getStationDepthRecord('Baker Street', 'metropolitan');
+
+    expect(circle.platformHeightMetres).toBeCloseTo(
+      (hammersmithCity.platformHeightMetres + metropolitan.platformHeightMetres) / 2,
+      8
+    );
+  });
+
+  it('marks shared track by consecutive station pairs rather than exact route vertices', async () => {
+    const storage = createStorage();
+    const lineMeta = [
+      { id: 'circle', name: 'Circle', modeName: 'tube' },
+      { id: 'hammersmith-city', name: 'Hammersmith & City', modeName: 'tube' }
+    ];
+    const routeSequence = {
+      lineStrings: ['[[[-0.156,51.522],[-0.145,51.524],[-0.134,51.525]]]'],
+      stations: [
+        {
+          stationId: '940GZZLUBST',
+          id: '940GZZLUBST',
+          name: 'Baker Street Underground Station',
+          lat: 51.522,
+          lon: -0.156,
+          zone: '1',
+          modes: ['tube'],
+          lines: [{ id: 'circle' }, { id: 'hammersmith-city' }]
+        },
+        {
+          stationId: '940GZZLUESQ',
+          id: '940GZZLUESQ',
+          name: 'Euston Square Underground Station',
+          lat: 51.525,
+          lon: -0.134,
+          zone: '1',
+          modes: ['tube'],
+          lines: [{ id: 'circle' }, { id: 'hammersmith-city' }]
+        }
+      ]
+    };
+
+    const result = await fetchNetworkData({
+      storage,
+      now: 5_000,
+      fetchImpl: async (url) => {
+        if (url.includes('/Line/Mode/tube,elizabeth-line/Route')) {
+          return createJsonResponse(lineMeta);
+        }
+
+        return createJsonResponse(routeSequence);
+      }
+    });
+
+    expect(result.scene.sharedTrackSections).toHaveLength(1);
+    expect(result.scene.sharedTrackSections[0].lineIds).toEqual(['circle', 'hammersmith-city']);
+  });
+
+  it('groups all co-running lines for the same consecutive station pair', async () => {
+    const storage = createStorage();
+    const lineMeta = [
+      { id: 'circle', name: 'Circle', modeName: 'tube' },
+      { id: 'hammersmith-city', name: 'Hammersmith & City', modeName: 'tube' },
+      { id: 'metropolitan', name: 'Metropolitan', modeName: 'tube' }
+    ];
+    const stations = [
+      {
+        stationId: '940GZZLUBST',
+        id: '940GZZLUBST',
+        name: 'Baker Street Underground Station',
+        lat: 51.522,
+        lon: -0.156,
+        zone: '1',
+        modes: ['tube'],
+        lines: lineMeta.map(({ id }) => ({ id }))
+      },
+      {
+        stationId: '940GZZLUESQ',
+        id: '940GZZLUESQ',
+        name: 'Euston Square Underground Station',
+        lat: 51.525,
+        lon: -0.134,
+        zone: '1',
+        modes: ['tube'],
+        lines: lineMeta.map(({ id }) => ({ id }))
+      }
+    ];
+
+    const result = await fetchNetworkData({
+      storage,
+      now: 5_000,
+      fetchImpl: async (url) => {
+        if (url.includes('/Line/Mode/tube,elizabeth-line/Route')) {
+          return createJsonResponse(lineMeta);
+        }
+
+        const hasHammersmithCity = url.includes('/Line/hammersmith-city/');
+        const lineStrings = hasHammersmithCity
+          ? ['[[[-0.156,51.522],[-0.148,51.524],[-0.134,51.525]]]']
+          : ['[[[-0.156,51.522],[-0.145,51.524],[-0.134,51.525]]]'];
+
+        return createJsonResponse({ lineStrings, stations });
+      }
+    });
+
+    expect(result.scene.sharedTrackSections).toHaveLength(1);
+    expect(result.scene.sharedTrackSections[0].lineIds).toEqual([
+      'circle',
+      'hammersmith-city',
+      'metropolitan'
+    ]);
   });
 });
