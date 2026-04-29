@@ -9,6 +9,7 @@ const DESKTOP_LABEL_LIMIT = 76;
 const MIN_LABEL_DISTANCE = 160;
 const SHARED_ROUTE_STRIPE_LENGTH = 46;
 const SHARED_SECTION_HIDE_DISTANCE = 44;
+const DIMMED_ROUTE_OPACITY = 0.14;
 let stationTexture = null;
 
 function hexToColor(value) {
@@ -103,16 +104,23 @@ function isSharedSectionEdge(segment, start, end, sharedSections, project) {
       return false;
     }
 
-    const [sectionStart, sectionEnd] = section.coordinates;
-    const projectedSectionStart = project(sectionStart, sectionStart[2]);
-    const projectedSectionEnd = project(sectionEnd, sectionEnd[2]);
-    const match = pointToSegmentDistanceSquared(
-      midpoint,
-      projectedSectionStart,
-      projectedSectionEnd
-    );
+    for (let index = 0; index < section.coordinates.length - 1; index += 1) {
+      const sectionStart = section.coordinates[index];
+      const sectionEnd = section.coordinates[index + 1];
+      const projectedSectionStart = project(sectionStart, sectionStart[2]);
+      const projectedSectionEnd = project(sectionEnd, sectionEnd[2]);
+      const match = pointToSegmentDistanceSquared(
+        midpoint,
+        projectedSectionStart,
+        projectedSectionEnd
+      );
 
-    return match.t > 0.02 && match.t < 0.98 && match.distanceSquared <= maxDistanceSquared;
+      if (match.t > 0.02 && match.t < 0.98 && match.distanceSquared <= maxDistanceSquared) {
+        return true;
+      }
+    }
+
+    return false;
   });
 }
 
@@ -186,7 +194,10 @@ function makeTubeMesh(points, colour, radius, options = {}) {
     emissive: options.emissive ?? '#000000',
     emissiveIntensity: options.emissiveIntensity ?? 0,
     roughness: options.roughness ?? 0.42,
-    metalness: options.metalness ?? 0.04
+    metalness: options.metalness ?? 0.04,
+    transparent: (options.opacity ?? 1) < 1,
+    opacity: options.opacity ?? 1,
+    depthWrite: (options.opacity ?? 1) >= 1
   });
 
   return new THREE.Mesh(geometry, material);
@@ -206,7 +217,10 @@ function makeCylinderBetween(start, end, radius, colour, options = {}) {
     emissive: options.emissive ?? colour,
     emissiveIntensity: options.emissiveIntensity ?? 0.03,
     roughness: options.roughness ?? 0.34,
-    metalness: options.metalness ?? 0.04
+    metalness: options.metalness ?? 0.04,
+    transparent: (options.opacity ?? 1) < 1,
+    opacity: options.opacity ?? 1,
+    depthWrite: (options.opacity ?? 1) >= 1
   });
   const mesh = new THREE.Mesh(geometry, material);
   const midpoint = start.clone().add(end).multiplyScalar(0.5);
@@ -218,109 +232,52 @@ function makeCylinderBetween(start, end, radius, colour, options = {}) {
   return mesh;
 }
 
-function roundedCoordinateKey([lon, lat, elevation = 0]) {
-  return `${lon.toFixed(5)},${lat.toFixed(5)},${elevation.toFixed(1)}`;
-}
-
-function sharedRouteEdgeKey(start, end) {
-  const keys = [roundedCoordinateKey(start), roundedCoordinateKey(end)].sort();
-
-  return keys.join('|');
-}
-
-export function collectSharedRouteEdges(lineSegments) {
-  const edgesByKey = new Map();
-
-  lineSegments.forEach((segment) => {
-    segment.coordinates.forEach((coordinate, index) => {
-      if (index === segment.coordinates.length - 1) {
-        return;
-      }
-
-      const next = segment.coordinates[index + 1];
-      const key = sharedRouteEdgeKey(coordinate, next);
-      const edge = edgesByKey.get(key) ?? {
-        start: coordinate,
-        end: next,
-        lines: new Map()
-      };
-
-      edge.lines.set(segment.lineId, segment.colour);
-      edgesByKey.set(key, edge);
-    });
-  });
-
-  return Array.from(edgesByKey.values()).filter((edge) => edge.lines.size > 1);
-}
-
-function makeStripedRouteOverlay(edge, project) {
-  const start = project(edge.start, edge.start[2]);
-  const end = project(edge.end, edge.end[2]);
-  const direction = end.clone().sub(start);
-  const length = direction.length();
-
-  if (length < 1) {
-    return [];
-  }
-
-  const colours = Array.from(edge.lines.entries())
-    .sort(([left], [right]) => left.localeCompare(right))
-    .map(([, colour]) => colour);
-  const stripeCount = Math.max(colours.length, Math.ceil(length / SHARED_ROUTE_STRIPE_LENGTH));
+function makeStripedSharedSectionOverlay(section, project, options = {}) {
+  const projectedPoints = section.coordinates.map((coordinate) => project(coordinate, coordinate[2]));
   const meshes = [];
+  let stripeOffset = 0;
 
-  for (let index = 0; index < stripeCount; index += 1) {
-    const from = index / stripeCount;
-    const to = (index + 1) / stripeCount;
-    const segmentStart = start.clone().lerp(end, from);
-    const segmentEnd = start.clone().lerp(end, to);
-    const mesh = makeCylinderBetween(
-      segmentStart,
-      segmentEnd,
-      LINE_RADIUS + 1.1,
-      colours[index % colours.length],
-      { renderOrder: 16 }
-    );
-
-    if (mesh) {
-      meshes.push(mesh);
-    }
-  }
-
-  return meshes;
-}
-
-function makeStripedSharedSectionOverlay(section, project) {
-  const [startCoordinate, endCoordinate] = section.coordinates;
-  const start = project(startCoordinate, startCoordinate[2]);
-  const end = project(endCoordinate, endCoordinate[2]);
-  const direction = end.clone().sub(start);
-  const length = direction.length();
-
-  if (length < 1) {
+  if (projectedPoints.length < 2) {
     return [];
   }
 
   const colours = section.lines.map((line) => line.colour);
-  const stripeCount = Math.max(colours.length, Math.ceil(length / SHARED_ROUTE_STRIPE_LENGTH));
-  const meshes = [];
 
-  for (let index = 0; index < stripeCount; index += 1) {
-    const from = index / stripeCount;
-    const to = (index + 1) / stripeCount;
-    const segmentStart = start.clone().lerp(end, from);
-    const segmentEnd = start.clone().lerp(end, to);
-    const mesh = makeCylinderBetween(
-      segmentStart,
-      segmentEnd,
-      LINE_RADIUS + 1.1,
-      colours[index % colours.length],
-      { renderOrder: 18 }
-    );
+  for (let pointIndex = 0; pointIndex < projectedPoints.length - 1; pointIndex += 1) {
+    const start = projectedPoints[pointIndex];
+    const end = projectedPoints[pointIndex + 1];
+    const length = start.distanceTo(end);
 
-    if (mesh) {
-      meshes.push(mesh);
+    if (length < 1) {
+      continue;
     }
+
+    const stripeCount = Math.max(colours.length, Math.ceil(length / SHARED_ROUTE_STRIPE_LENGTH));
+
+    for (let stripeIndex = 0; stripeIndex < stripeCount; stripeIndex += 1) {
+      const overlap = Math.min(0.006, 0.2 / stripeCount);
+      const from = Math.max(0, stripeIndex / stripeCount - overlap);
+      const to = Math.min(1, (stripeIndex + 1) / stripeCount + overlap);
+      const segmentStart = start.clone().lerp(end, from);
+      const segmentEnd = start.clone().lerp(end, to);
+      const mesh = makeCylinderBetween(
+        segmentStart,
+        segmentEnd,
+        LINE_RADIUS + (options.isFocused ? 1.8 : 1.1),
+        colours[(stripeOffset + stripeIndex) % colours.length],
+        {
+          opacity: options.opacity ?? 1,
+          radialSegments: 20,
+          renderOrder: options.isFocused ? 22 : 18
+        }
+      );
+
+      if (mesh) {
+        meshes.push(mesh);
+      }
+    }
+
+    stripeOffset += stripeCount;
   }
 
   return meshes;
@@ -361,7 +318,7 @@ function getStationTexture() {
   return stationTexture;
 }
 
-function makeStationNode(node, project) {
+function makeStationNode(node, project, options = {}) {
   const anchor = new THREE.Group();
   const position = project(node.coordinates, node.elevation);
   anchor.position.copy(position);
@@ -370,12 +327,14 @@ function makeStationNode(node, project) {
     new THREE.SpriteMaterial({
       map: getStationTexture(),
       transparent: true,
+      opacity: options.opacity ?? 1,
       depthTest: false,
       depthWrite: false
     })
   );
   sprite.renderOrder = 40;
-  sprite.scale.set(22, 22, 1);
+  const scale = options.scale ?? 22;
+  sprite.scale.set(scale, scale, 1);
 
   anchor.add(sprite);
   anchor.userData = { type: 'station', node, sprite };
@@ -430,7 +389,7 @@ export function selectLabelGroups(stationGroups, project, labelLimit = DESKTOP_L
   return selected;
 }
 
-function fitCamera(camera, controls, points, width, height) {
+function fitCamera(camera, controls, points, width, height, options = {}) {
   const box = new THREE.Box3().setFromPoints(points);
   const center = box.getCenter(new THREE.Vector3());
   const size = box.getSize(new THREE.Vector3());
@@ -438,7 +397,8 @@ function fitCamera(camera, controls, points, width, height) {
   const fovRadians = (camera.fov * Math.PI) / 180;
   const fitHeightDistance = (size.y * 0.85 + size.z * 0.52) / Math.tan(fovRadians / 2);
   const fitWidthDistance = (size.x * 0.78) / Math.tan(fovRadians / 2) / Math.max(aspect, 0.7);
-  const responsiveScale = aspect < 0.75 ? 2.45 : 0.64;
+  const baseScale = options.closeCrop ? 0.42 : 0.64;
+  const responsiveScale = aspect < 0.75 ? (options.closeCrop ? 1.85 : 2.45) : baseScale;
   const distance = Math.max(fitHeightDistance, fitWidthDistance, 780) * responsiveScale;
   const offset = new THREE.Vector3(-0.72, 0.66, 1.12)
     .normalize()
@@ -453,9 +413,17 @@ function fitCamera(camera, controls, points, width, height) {
   controls.update();
 }
 
-function makeLabel(group, project) {
+function makeLabel(group, project, focusedLineId = 'all') {
   const label = document.createElement('div');
-  label.className = 'station-label';
+  const hasFocus = focusedLineId !== 'all';
+  const isFocused = group.nodes.some((node) => node.lineId === focusedLineId);
+  const isMajor = group.importance >= 12 || group.nodes.length > 2;
+  label.className = [
+    'station-label',
+    isMajor ? 'station-label--major' : '',
+    hasFocus && isFocused ? 'station-label--focused' : '',
+    hasFocus && !isFocused ? 'station-label--dimmed' : ''
+  ].filter(Boolean).join(' ');
   label.textContent = group.name;
   label.dataset.stationName = group.name;
 
@@ -500,7 +468,8 @@ function hoverLineMarkup(line) {
 }
 
 export function createScene(container, networkData, options = {}) {
-  const { hoverEl, onReady, distortion = {}, initialViewState = null } = options;
+  const { hoverEl, onReady, distortion = {}, initialViewState = null, focusedLineId = 'all' } = options;
+  const hasLineFocus = focusedLineId !== 'all';
   const project = computeProjection(networkData.scene, distortion);
 
   const scene = new THREE.Scene();
@@ -564,22 +533,31 @@ export function createScene(container, networkData, options = {}) {
 
   const interactiveObjects = [];
   const scenePoints = [];
+  const focusPoints = [];
 
   const sharedTrackSections = networkData.scene.sharedTrackSections ?? [];
 
   networkData.scene.lineSegments.forEach((segment) => {
     const coordinateRuns = visibleCoordinateRuns(segment, sharedTrackSections, project);
     const radius = lineRadiusFor(segment.lineId);
+    const isFocused = !hasLineFocus || segment.lineId === focusedLineId;
+    const routeOpacity = isFocused ? 1 : DIMMED_ROUTE_OPACITY;
+    const underlayOpacity = isFocused ? 1 : 0.08;
 
     coordinateRuns.forEach((coordinates) => {
       const points = coordinates.map(([lon, lat, elevation]) => project([lon, lat], elevation));
       scenePoints.push(...points);
+      if (segment.lineId === focusedLineId) {
+        focusPoints.push(...points);
+      }
       const underlayMesh = makeTubeMesh(points, darkenColour(segment.colour, 0.28), radius + 3.4, {
+        opacity: underlayOpacity,
         roughness: 0.56
       });
       const lineMesh = makeTubeMesh(points, segment.colour, radius, {
         emissive: segment.colour,
         emissiveIntensity: 0.04,
+        opacity: routeOpacity,
         roughness: 0.36
       });
 
@@ -603,14 +581,18 @@ export function createScene(container, networkData, options = {}) {
     });
   });
 
-  collectSharedRouteEdges(networkData.scene.lineSegments).forEach((edge) => {
-    makeStripedRouteOverlay(edge, project).forEach((mesh) => {
-      scene.add(mesh);
-    });
-  });
-
   sharedTrackSections.forEach((section) => {
-    makeStripedSharedSectionOverlay(section, project).forEach((mesh) => {
+    const isFocused = !hasLineFocus || section.lineIds?.includes(focusedLineId);
+    const points = section.coordinates.map(([lon, lat, elevation]) => project([lon, lat], elevation));
+
+    if (section.lineIds?.includes(focusedLineId)) {
+      focusPoints.push(...points);
+    }
+
+    makeStripedSharedSectionOverlay(section, project, {
+      isFocused,
+      opacity: isFocused ? 1 : DIMMED_ROUTE_OPACITY
+    }).forEach((mesh) => {
       scene.add(mesh);
     });
   });
@@ -621,6 +603,14 @@ export function createScene(container, networkData, options = {}) {
     }
 
     for (let index = 0; index < group.nodes.length - 1; index += 1) {
+      if (
+        hasLineFocus &&
+        group.nodes[index].lineId !== focusedLineId &&
+        group.nodes[index + 1].lineId !== focusedLineId
+      ) {
+        continue;
+      }
+
       const start = project(group.nodes[index].coordinates, group.nodes[index].elevation);
       const end = project(group.nodes[index + 1].coordinates, group.nodes[index + 1].elevation);
       const connector = makeConnector(start, end);
@@ -632,17 +622,34 @@ export function createScene(container, networkData, options = {}) {
   });
 
   networkData.scene.stationNodes.forEach((node) => {
-    const stationAnchor = makeStationNode(node, project);
+    const isFocused = !hasLineFocus || node.lineId === focusedLineId;
+    const stationAnchor = makeStationNode(node, project, {
+      opacity: isFocused ? 1 : 0.2,
+      scale: isFocused ? 24 : 16
+    });
     scenePoints.push(stationAnchor.position.clone());
+    if (node.lineId === focusedLineId) {
+      focusPoints.push(stationAnchor.position.clone());
+    }
     interactiveObjects.push(stationAnchor);
     scene.add(stationAnchor);
   });
 
-  networkData.scene.stationGroups.forEach((group) => {
-    scene.add(makeLabel(group, project));
+  const mobileLabelLimit = hasLineFocus ? 24 : 3;
+  const desktopLabelLimit = hasLineFocus ? 88 : 62;
+  const labelLimit = container.clientWidth < 720 ? mobileLabelLimit : desktopLabelLimit;
+  const labelSourceGroups = hasLineFocus
+    ? networkData.scene.stationGroups.filter((group) => group.nodes.some((node) => node.lineId === focusedLineId))
+    : networkData.scene.stationGroups;
+
+  selectLabelGroups(labelSourceGroups, project, labelLimit).forEach(({ group }) => {
+    scene.add(makeLabel(group, project, focusedLineId));
   });
 
-  fitCamera(camera, controls, scenePoints, container.clientWidth, container.clientHeight);
+  let cameraFitPoints = hasLineFocus && focusPoints.length > 1 ? focusPoints : scenePoints;
+  fitCamera(camera, controls, cameraFitPoints, container.clientWidth, container.clientHeight, {
+    closeCrop: hasLineFocus
+  });
   applyViewState(camera, controls, initialViewState);
 
   const raycaster = new THREE.Raycaster();
@@ -722,7 +729,9 @@ export function createScene(container, networkData, options = {}) {
     const height = container.clientHeight;
     camera.aspect = width / height;
     camera.updateProjectionMatrix();
-    fitCamera(camera, controls, scenePoints, width, height);
+    fitCamera(camera, controls, cameraFitPoints, width, height, {
+      closeCrop: hasLineFocus
+    });
     renderer.setSize(width, height);
     labelRenderer.setSize(width, height);
   });

@@ -7,7 +7,8 @@
     "dev": "vite",
     "build": "vite build",
     "preview": "vite preview",
-    "test": "vitest run"
+    "test": "vitest run",
+    "download:geometries": "node scripts/download-line-geometries.mjs"
   },
   "dependencies": {
     "three": "^0.184.0"

@@ -5,7 +5,7 @@ function createStorage(initialValue) {
   const values = new Map();
 
   if (initialValue) {
-    values.set('subsurface.network.v8', JSON.stringify(initialValue));
+    values.set('subsurface.network.v12', JSON.stringify(initialValue));
   }
 
   return {
@@ -280,7 +280,7 @@ describe('fetchNetworkData', () => {
     expect(result.stationCount).toBe(1);
     expect(calls).toHaveLength(3);
     expect(result.scene.lineSegments[0].coordinates[0]).toHaveLength(3);
-    expect(storage.getItem('subsurface.network.v8')).toContain('"cachedAt":5000');
+    expect(storage.getItem('subsurface.network.v12')).toContain('"cachedAt":5000');
   });
 
   it('snaps stations onto the nearest served line geometry', async () => {
@@ -320,7 +320,7 @@ describe('fetchNetworkData', () => {
 });
 
 describe('station depth data', () => {
-  it('uses TfL FOI platform heights for Waterloo line ordering', () => {
+  it('uses station depth data for Waterloo line ordering', () => {
     const bakerloo = getStationDepthRecord('Waterloo', 'bakerloo');
     const jubilee = getStationDepthRecord('Waterloo', 'jubilee');
     const northern = getStationDepthRecord('Waterloo', 'northern');
@@ -332,15 +332,44 @@ describe('station depth data', () => {
     expect(waterlooCity.platformHeightMetres).toBeGreaterThan(jubilee.platformHeightMetres);
   });
 
-  it('uses same-station subsurface platform rows for Circle line levels', () => {
+  it('uses explicit Circle platform rows from the station depth data', () => {
     const circle = getStationDepthRecord('Baker Street', 'circle');
     const hammersmithCity = getStationDepthRecord('Baker Street', 'hammersmith-city');
-    const metropolitan = getStationDepthRecord('Baker Street', 'metropolitan');
 
-    expect(circle.platformHeightMetres).toBeCloseTo(
-      (hammersmithCity.platformHeightMetres + metropolitan.platformHeightMetres) / 2,
-      8
-    );
+    expect(circle.platformHeightMetres).toBeCloseTo(hammersmithCity.platformHeightMetres, 8);
+    expect(circle.source).toBe('station-depths.csv');
+  });
+
+  it('uses explicit Hammersmith & City eastern platform rows from the station depth data', () => {
+    const district = getStationDepthRecord('East Ham', 'district');
+    const hammersmithCity = getStationDepthRecord('East Ham', 'hammersmith-city');
+
+    expect(hammersmithCity.platformHeightMetres).toBeCloseTo(district.platformHeightMetres, 8);
+    expect(hammersmithCity.source).toBe('station-depths.csv');
+  });
+
+  it('uses explicit Elizabeth line core platform rows where available', () => {
+    const bondStreet = getStationDepthRecord('Bond Street', 'elizabeth');
+
+    expect(bondStreet.platformHeightMetres).toBeCloseTo(-28, 8);
+    expect(bondStreet.depthBelowGroundMetres).toBeCloseTo(50, 8);
+    expect(bondStreet.source).toBe('station-depths.csv');
+  });
+
+  it('approximates Elizabeth line Heathrow levels from Piccadilly platforms', () => {
+    const piccadilly = getStationDepthRecord('Heathrow Terminal 5', 'piccadilly');
+    const elizabeth = getStationDepthRecord('Heathrow Terminal 5', 'elizabeth');
+
+    expect(elizabeth.platformHeightMetres).toBeCloseTo(piccadilly.platformHeightMetres, 8);
+    expect(elizabeth.source).toContain('Piccadilly platform row');
+  });
+
+  it('uses surface-level fallback for Elizabeth line stations without depth data', () => {
+    const reading = getStationDepthRecord('Reading', 'elizabeth');
+
+    expect(reading.platformHeightMetres).toBe(0);
+    expect(reading.depthBelowGroundMetres).toBe(0);
+    expect(reading.source).toContain('surface-level fallback');
   });
 
   it('marks shared track by consecutive station pairs rather than exact route vertices', async () => {
@@ -389,6 +418,9 @@ describe('station depth data', () => {
 
     expect(result.scene.sharedTrackSections).toHaveLength(1);
     expect(result.scene.sharedTrackSections[0].lineIds).toEqual(['circle', 'hammersmith-city']);
+    expect(result.scene.sharedTrackSections[0].coordinates).toHaveLength(3);
+    expect(result.scene.sharedTrackSections[0].coordinates[1][0]).toBeCloseTo(-0.145, 8);
+    expect(result.scene.sharedTrackSections[0].coordinates[1][1]).toBeCloseTo(51.524, 8);
   });
 
   it('groups all co-running lines for the same consecutive station pair', async () => {

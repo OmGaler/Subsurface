@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { collectSharedRouteEdges, computeProjection, selectLabelGroups, visibleCoordinateRuns } from './scene.js';
+import { computeProjection, selectLabelGroups, visibleCoordinateRuns } from './scene.js';
 
 const sceneData = {
   lineSegments: [
@@ -59,31 +59,6 @@ describe('selectLabelGroups', () => {
   });
 });
 
-describe('collectSharedRouteEdges', () => {
-  it('does not merge matching map paths when the lines run at different depths', () => {
-    const edges = collectSharedRouteEdges([
-      {
-        lineId: 'northern',
-        colour: '#000000',
-        coordinates: [
-          [-0.114, 51.503, -20],
-          [-0.088, 51.513, -18]
-        ]
-      },
-      {
-        lineId: 'waterloo-city',
-        colour: '#76d0bd',
-        coordinates: [
-          [-0.114, 51.503, -8],
-          [-0.088, 51.513, -6]
-        ]
-      }
-    ]);
-
-    expect(edges).toEqual([]);
-  });
-});
-
 describe('visibleCoordinateRuns', () => {
   it('omits ordinary line geometry where a shared station-pair section owns the span', () => {
     const segment = {
@@ -100,6 +75,7 @@ describe('visibleCoordinateRuns', () => {
         lineIds: ['circle', 'hammersmith-city', 'metropolitan'],
         coordinates: [
           [-0.156, 51.522, -8],
+          [-0.145, 51.524, -8],
           [-0.134, 51.525, -8]
         ]
       }

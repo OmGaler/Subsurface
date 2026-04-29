@@ -1,12 +1,12 @@
 import { INCLUDED_LINE_IDS, LINE_COLOURS } from './constants.js';
-import stationDepthCsv from '../data/station-depths-tfl-foi-0493-2223.csv?raw';
+import stationDepthCsv from '../data/station-depths.csv?raw';
 
 const API_BASE = 'https://api.tfl.gov.uk';
-const CACHE_KEY = 'subsurface.network.v8';
+const CACHE_KEY = 'subsurface.network.v12';
 const CACHE_TTL_MS = 1000 * 60 * 60 * 24;
 const LONDON_CORE = [-0.118092, 51.509865];
 const PLATFORM_HEIGHT_OFFSET_METRES = 100;
-const DEPTH_SOURCE = 'TfL FOI-0493-2223 Station depths.csv';
+const DEPTH_SOURCE = 'station-depths.csv';
 const LINE_STATION_BRANCH_MAX_DISTANCE_METRES = 75;
 
 const CSV_LINE_NAMES = {
@@ -15,13 +15,15 @@ const CSV_LINE_NAMES = {
   District: 'district',
   'Hammersmith & City': 'hammersmith-city',
   Jubilee: 'jubilee',
+  'Elizabeth Line': 'elizabeth',
   Metropoliton: 'metropolitan',
+  Metropolitan: 'metropolitan',
   Northern: 'northern',
   Piccadilly: 'piccadilly',
   Victoria: 'victoria',
+  Circle: 'circle',
   'Waterloo & City': 'waterloo-city'
 };
-const CIRCLE_PLATFORM_LINE_IDS = ['district', 'hammersmith-city', 'metropolitan'];
 
 function buildAuthQuery() {
   const params = new URLSearchParams();
@@ -124,19 +126,27 @@ function buildStationDepthLookup(csvText) {
   });
 
   const lookup = new Map();
+  const groundLevels = new Map();
 
   rows.slice(2).forEach((row) => {
     const stationName = row[0]?.trim();
     const groundLevelMetres = Number.parseFloat(row[1]);
 
-    if (!stationName || !Number.isFinite(groundLevelMetres)) {
+    if (!stationName) {
       return;
+    }
+
+    if (Number.isFinite(groundLevelMetres)) {
+      groundLevels.set(normaliseLookupName(stationName), {
+        stationName: stationName.trim(),
+        groundLevelMetres
+      });
     }
 
     columns.forEach(({ index, lineId }) => {
       const rawPlatformHeight = Number.parseFloat(row[index]);
 
-      if (!Number.isFinite(rawPlatformHeight)) {
+      if (!Number.isFinite(rawPlatformHeight) || !Number.isFinite(groundLevelMetres)) {
         return;
       }
 
@@ -167,10 +177,15 @@ function buildStationDepthLookup(csvText) {
     });
   });
 
-  return lookup;
+  return {
+    depths: lookup,
+    groundLevels
+  };
 }
 
-const STATION_DEPTHS = buildStationDepthLookup(stationDepthCsv);
+const STATION_DEPTH_DATA = buildStationDepthLookup(stationDepthCsv);
+const STATION_DEPTHS = STATION_DEPTH_DATA.depths;
+const STATION_GROUND_LEVELS = STATION_DEPTH_DATA.groundLevels;
 
 function formatStationName(name) {
   if (typeof name !== 'string') {
@@ -382,25 +397,30 @@ export function getStationDepthRecord(stationName, lineId) {
   const lookupName = normaliseLookupName(stationName);
   const directRecord = STATION_DEPTHS.get(`${lookupName}|${lineId}`);
 
-  if (directRecord || lineId !== 'circle') {
+  if (directRecord || lineId !== 'elizabeth') {
     return directRecord ?? null;
   }
 
-  const sharedPlatformRecords = CIRCLE_PLATFORM_LINE_IDS
-    .map((platformLineId) => STATION_DEPTHS.get(`${lookupName}|${platformLineId}`))
-    .filter(Boolean);
+  const piccadillyRecord = STATION_DEPTHS.get(`${lookupName}|piccadilly`);
 
-  if (sharedPlatformRecords.length === 0) {
-    return null;
+  if (piccadillyRecord && lookupName.includes('heathrow')) {
+    return {
+      ...piccadillyRecord,
+      lineId,
+      source: `${DEPTH_SOURCE}; Elizabeth line Heathrow level approximated from same-station Piccadilly platform row`
+    };
   }
 
+  const groundRecord = STATION_GROUND_LEVELS.get(lookupName);
+  const groundLevelMetres = groundRecord?.groundLevelMetres ?? 0;
+
   return {
-    stationName: sharedPlatformRecords[0].stationName,
+    stationName: groundRecord?.stationName ?? formatStationName(stationName),
     lineId,
-    groundLevelMetres: mean(sharedPlatformRecords.map((record) => record.groundLevelMetres)),
-    platformHeightMetres: mean(sharedPlatformRecords.map((record) => record.platformHeightMetres)),
-    depthBelowGroundMetres: mean(sharedPlatformRecords.map((record) => record.depthBelowGroundMetres)),
-    source: `${DEPTH_SOURCE}; Circle platform level from same-station District/H&C/Metropolitan platform rows`
+    groundLevelMetres,
+    platformHeightMetres: groundLevelMetres,
+    depthBelowGroundMetres: 0,
+    source: `${DEPTH_SOURCE}; Elizabeth line surface-level fallback`
   };
 }
 
@@ -452,6 +472,93 @@ function lineMeasures(coordinates) {
   }
 
   return measures;
+}
+
+function coordinateAtMeasure(coordinates, measures, measure) {
+  if (measure <= measures[0]) {
+    return [...coordinates[0]];
+  }
+
+  const lastIndex = coordinates.length - 1;
+
+  if (measure >= measures[lastIndex]) {
+    return [...coordinates[lastIndex]];
+  }
+
+  for (let index = 0; index < coordinates.length - 1; index += 1) {
+    const startMeasure = measures[index];
+    const endMeasure = measures[index + 1];
+
+    if (measure >= startMeasure && measure <= endMeasure) {
+      const span = endMeasure - startMeasure;
+      const amount = span === 0 ? 0 : (measure - startMeasure) / span;
+      const start = coordinates[index];
+      const end = coordinates[index + 1];
+
+      return [
+        start[0] + (end[0] - start[0]) * amount,
+        start[1] + (end[1] - start[1]) * amount
+      ];
+    }
+  }
+
+  return [...coordinates[lastIndex]];
+}
+
+function isSameCoordinate(left, right) {
+  return Math.abs(left[0] - right[0]) < 1e-9 && Math.abs(left[1] - right[1]) < 1e-9;
+}
+
+function pushUniquePathPoint(points, point) {
+  const previous = points[points.length - 1];
+
+  if (!previous || !isSameCoordinate(previous.coordinate, point.coordinate)) {
+    points.push(point);
+  }
+}
+
+function extractMeasuredPath(coordinates, startMeasure, endMeasure) {
+  const measures = lineMeasures(coordinates);
+  const lowerMeasure = Math.min(startMeasure, endMeasure);
+  const upperMeasure = Math.max(startMeasure, endMeasure);
+  const span = upperMeasure - lowerMeasure;
+  const points = [];
+
+  pushUniquePathPoint(points, {
+    coordinate: coordinateAtMeasure(coordinates, measures, lowerMeasure),
+    amount: 0
+  });
+
+  coordinates.forEach((coordinate, index) => {
+    const measure = measures[index];
+
+    if (measure > lowerMeasure && measure < upperMeasure) {
+      pushUniquePathPoint(points, {
+        coordinate: [...coordinate],
+        amount: span === 0 ? 0 : (measure - lowerMeasure) / span
+      });
+    }
+  });
+
+  pushUniquePathPoint(points, {
+    coordinate: coordinateAtMeasure(coordinates, measures, upperMeasure),
+    amount: 1
+  });
+
+  return startMeasure <= endMeasure ? points : points.reverse().map((point) => ({
+    coordinate: point.coordinate,
+    amount: 1 - point.amount
+  }));
+}
+
+function pathLengthMeters(points) {
+  let length = 0;
+
+  for (let index = 0; index < points.length - 1; index += 1) {
+    length += distanceMetersBetween(points[index].coordinate, points[index + 1].coordinate);
+  }
+
+  return length;
 }
 
 function interpolatePlatformHeight(measure, measuredStations) {
@@ -516,6 +623,7 @@ function buildSharedTrackSections(lineFeatures, sceneStationNodes) {
         stationNamesById: new Map(),
         stationPointsById: new Map(),
         lines: new Map(),
+        paths: []
       };
 
       [start, end].forEach((station) => {
@@ -539,27 +647,63 @@ function buildSharedTrackSections(lineFeatures, sceneStationNodes) {
         lineName: feature.properties.lineName,
         colour: feature.properties.colour
       });
+      section.paths.push({
+        lineId: feature.properties.lineId,
+        stationIds: [start.stationId, end.stationId],
+        points: extractMeasuredPath(feature.geometry.coordinates, start.measureMeters, end.measureMeters)
+      });
       sectionsByKey.set(key, section);
     }
   });
 
   return Array.from(sectionsByKey.values())
     .filter((section) => section.lines.size > 1)
-    .map((section) => ({
-      stationIds: section.stationIds,
-      stationNames: section.stationIds.map((stationId) => section.stationNamesById.get(stationId)),
-      lineIds: Array.from(section.lines.keys()).sort(),
-      lines: Array.from(section.lines.values()).sort((left, right) => left.lineId.localeCompare(right.lineId)),
-      coordinates: section.stationIds.map((stationId) => {
-        const point = section.stationPointsById.get(stationId);
+    .map((section) => {
+      const selectedPath = section.paths
+        .slice()
+        .sort((left, right) => {
+          const lengthDifference = pathLengthMeters(right.points) - pathLengthMeters(left.points);
+
+          if (Math.abs(lengthDifference) > 0.1) {
+            return lengthDifference;
+          }
+
+          return right.points.length - left.points.length;
+        })[0];
+      const startPoint = section.stationPointsById.get(selectedPath.stationIds[0]);
+      const endPoint = section.stationPointsById.get(selectedPath.stationIds[1]);
+      const startElevation = startPoint.elevation / startPoint.count;
+      const endElevation = endPoint.elevation / endPoint.count;
+      const coordinates = selectedPath.points.map((point) => {
 
         return [
-          point.lon / point.count,
-          point.lat / point.count,
-          point.elevation / point.count
+          point.coordinate[0],
+          point.coordinate[1],
+          startElevation + (endElevation - startElevation) * point.amount
         ];
-      })
-    }));
+      });
+
+      return {
+        stationIds: section.stationIds,
+        stationNames: section.stationIds.map((stationId) => section.stationNamesById.get(stationId)),
+        lineIds: Array.from(section.lines.keys()).sort(),
+        lines: Array.from(section.lines.values()).sort((left, right) => left.lineId.localeCompare(right.lineId)),
+        coordinates: coordinates.map((coordinate, index) => {
+          if (index !== 0 && index !== coordinates.length - 1) {
+            return coordinate;
+          }
+
+          const stationId = index === 0 ? selectedPath.stationIds[0] : selectedPath.stationIds[1];
+          const point = section.stationPointsById.get(stationId);
+
+          return [
+            point.lon / point.count,
+            point.lat / point.count,
+            point.elevation / point.count
+          ];
+        })
+      };
+    });
 }
 
 function buildSceneModel(lineFeatures, stationNodeFeatures) {
