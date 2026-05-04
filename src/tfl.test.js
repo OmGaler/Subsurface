@@ -10,6 +10,41 @@ function createJsonResponse(data) {
   };
 }
 
+function createMemoryStorage(initialValues = {}) {
+  const values = new Map(Object.entries(initialValues));
+
+  return {
+    getItem(key) {
+      return values.get(key) ?? null;
+    },
+    setItem(key, value) {
+      values.set(key, value);
+    }
+  };
+}
+
+function createMinimalNetworkData(source = 'test') {
+  return {
+    source,
+    lineCount: 1,
+    stationCount: 1,
+    lines: {
+      type: 'FeatureCollection',
+      features: []
+    },
+    stations: {
+      type: 'FeatureCollection',
+      features: []
+    },
+    scene: {
+      lineSegments: [],
+      stationNodes: [],
+      stationGroups: [],
+      sharedTrackSections: []
+    }
+  };
+}
+
 describe('normaliseRouteSequence', () => {
   it('converts TfL route strings into line and station GeoJSON features', () => {
     const lineMeta = {
@@ -214,6 +249,47 @@ describe('normaliseRouteSequence', () => {
 });
 
 describe('fetchNetworkData', () => {
+  it('uses a static network snapshot before live TfL requests', async () => {
+    const calls = [];
+    const snapshot = createMinimalNetworkData('snapshot-file');
+    const result = await fetchNetworkData({
+      cacheStorage: null,
+      staticCacheUrl: '/network-cache.json',
+      fetchImpl: async (url) => {
+        calls.push(url);
+
+        return createJsonResponse(snapshot);
+      }
+    });
+
+    expect(result.source).toBe('snapshot');
+    expect(calls).toEqual(['/network-cache.json']);
+  });
+
+  it('uses stale browser cache when live data cannot be fetched', async () => {
+    const cached = createMinimalNetworkData('old-live');
+    const cacheStorage = createMemoryStorage({
+      'subsurface.network.v1': JSON.stringify({
+        storedAt: 1,
+        data: cached
+      })
+    });
+
+    const result = await fetchNetworkData({
+      now: 1000 * 60 * 60 * 24 * 10,
+      cacheMaxAgeMs: 1,
+      cacheStorage,
+      staticCacheUrl: '',
+      fetchImpl: async () => ({
+        ok: false,
+        status: 503
+      })
+    });
+
+    expect(result.source).toBe('stale-cache');
+    expect(result.scene.stationGroups).toEqual([]);
+  });
+
   it('fetches live data without browser storage', async () => {
     const calls = [];
     const lineMeta = [

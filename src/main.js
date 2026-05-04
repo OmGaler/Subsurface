@@ -8,6 +8,7 @@ const DEFAULT_DISTORTION = {
   verticalScale: 4.6
 };
 const TOUR_INTERVAL_MS = 7000;
+const DISTORTION_RENDER_DEBOUNCE_MS = 140;
 
 app.innerHTML = `
   <div class="viewport">
@@ -62,6 +63,7 @@ const verticalScaleValueEl = document.querySelector('#vertical-scale-value');
 let sceneHandle = null;
 let networkDataCache = null;
 let renderFrameId = 0;
+let renderTimerId = 0;
 let tourTimerId = 0;
 let lineOptions = [];
 let activeLineId = 'all';
@@ -112,6 +114,9 @@ function renderScene() {
 }
 
 function queueRenderScene() {
+  window.clearTimeout(renderTimerId);
+  renderTimerId = 0;
+
   if (renderFrameId) {
     window.cancelAnimationFrame(renderFrameId);
   }
@@ -120,6 +125,23 @@ function queueRenderScene() {
     renderFrameId = 0;
     renderScene();
   });
+}
+
+function queueDebouncedDistortionUpdate() {
+  if (renderTimerId) {
+    window.clearTimeout(renderTimerId);
+  }
+
+  renderTimerId = window.setTimeout(() => {
+    renderTimerId = 0;
+
+    if (sceneHandle?.updateDistortion) {
+      sceneHandle.updateDistortion(currentDistortion());
+      return;
+    }
+
+    queueRenderScene();
+  }, DISTORTION_RENDER_DEBOUNCE_MS);
 }
 
 function buildLineOptions(networkData) {
@@ -227,8 +249,7 @@ function syncScaleControl(rangeInput, numberInput, rawValue) {
 
   rangeInput.value = displayValue;
   numberInput.value = displayValue;
-  preserveViewOnNextRender = true;
-  queueRenderScene();
+  queueDebouncedDistortionUpdate();
 }
 
 function bindScaleControl(rangeInput, numberInput) {

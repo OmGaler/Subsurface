@@ -7,6 +7,9 @@ const PLATFORM_HEIGHT_OFFSET_METRES = 100;
 const DEPTH_SOURCE = 'station-depths.csv';
 const LINE_STATION_BRANCH_MAX_DISTANCE_METRES = 75;
 const SHARED_TRACK_MAX_ELEVATION_GAP_METRES = 7;
+const NETWORK_CACHE_KEY = 'subsurface.network.v1';
+const NETWORK_CACHE_MAX_AGE_MS = 1000 * 60 * 60 * 24 * 7;
+const STATIC_NETWORK_CACHE_URL = '/network-cache.json';
 const NON_SHARED_LINE_IDS = new Set(['elizabeth']);
 
 const CSV_LINE_NAMES = {
@@ -873,6 +876,91 @@ export function normaliseRouteSequence(lineMeta, routeSequence) {
   };
 }
 
+function isNetworkData(value) {
+  return Boolean(
+    value?.scene?.lineSegments &&
+    value?.scene?.stationNodes &&
+    value?.scene?.stationGroups
+  );
+}
+
+function browserCacheStorage() {
+  try {
+    return typeof window !== 'undefined' ? window.localStorage : null;
+  } catch {
+    return null;
+  }
+}
+
+function readNetworkCache(cacheStorage, now, maxAgeMs, options = {}) {
+  if (!cacheStorage) {
+    return null;
+  }
+
+  try {
+    const cached = JSON.parse(cacheStorage.getItem(NETWORK_CACHE_KEY) ?? 'null');
+
+    if (!cached?.storedAt || !isNetworkData(cached.data)) {
+      return null;
+    }
+
+    if (!options.allowStale && now - cached.storedAt > maxAgeMs) {
+      return null;
+    }
+
+    return {
+      ...cached.data,
+      source: options.allowStale ? 'stale-cache' : 'cache'
+    };
+  } catch {
+    return null;
+  }
+}
+
+function writeNetworkCache(cacheStorage, data, now) {
+  if (!cacheStorage || !isNetworkData(data)) {
+    return;
+  }
+
+  try {
+    cacheStorage.setItem(NETWORK_CACHE_KEY, JSON.stringify({
+      storedAt: now,
+      data
+    }));
+  } catch {
+    // Browsers may reject storage in private contexts; live data can still render.
+  }
+}
+
+async function fetchStaticNetworkCache(fetchImpl, staticCacheUrl) {
+  if (!staticCacheUrl) {
+    return null;
+  }
+
+  try {
+    const response = await fetchImpl(staticCacheUrl, {
+      cache: 'force-cache'
+    });
+
+    if (!response.ok) {
+      return null;
+    }
+
+    const data = await response.json();
+
+    if (!isNetworkData(data)) {
+      return null;
+    }
+
+    return {
+      ...data,
+      source: 'snapshot'
+    };
+  } catch {
+    return null;
+  }
+}
+
 async function fetchFreshNetworkData(fetchImpl) {
   const lineResponse = await fetchImpl(
     buildEndpoint('/Line/Mode/tube,elizabeth-line/Route', {
@@ -1002,13 +1090,43 @@ async function fetchFreshNetworkData(fetchImpl) {
 
 export async function fetchNetworkData(options = {}) {
   const {
-    fetchImpl = fetch
+    fetchImpl = fetch,
+    now = Date.now(),
+    cacheMaxAgeMs = NETWORK_CACHE_MAX_AGE_MS,
+    cacheStorage = browserCacheStorage(),
+    staticCacheUrl = typeof window !== 'undefined' ? STATIC_NETWORK_CACHE_URL : ''
   } = options;
+  const cachedData = readNetworkCache(cacheStorage, now, cacheMaxAgeMs);
 
-  const freshData = await fetchFreshNetworkData(fetchImpl);
+  if (cachedData) {
+    return cachedData;
+  }
 
-  return {
-    ...freshData,
-    source: 'live'
-  };
+  const staticData = await fetchStaticNetworkCache(fetchImpl, staticCacheUrl);
+
+  if (staticData) {
+    writeNetworkCache(cacheStorage, staticData, now);
+    return staticData;
+  }
+
+  try {
+    const freshData = await fetchFreshNetworkData(fetchImpl);
+
+    writeNetworkCache(cacheStorage, freshData, now);
+
+    return {
+      ...freshData,
+      source: 'live'
+    };
+  } catch (error) {
+    const staleCache = readNetworkCache(cacheStorage, now, cacheMaxAgeMs, {
+      allowStale: true
+    });
+
+    if (staleCache) {
+      return staleCache;
+    }
+
+    throw error;
+  }
 }

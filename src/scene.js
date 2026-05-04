@@ -12,6 +12,15 @@ const SHARED_SECTION_HIDE_DISTANCE = 44;
 const DIMMED_ROUTE_OPACITY = 0.14;
 let stationTexture = null;
 
+const RENDER_QUALITY = {
+  pixelRatio: 2,
+  tubeRadialSegments: 22,
+  sharedRadialSegments: 24,
+  tubeSegmentScale: 4,
+  labelScale: 1,
+  stationScale: 1
+};
+
 function hexToColor(value) {
   return new THREE.Color(value);
 }
@@ -297,15 +306,13 @@ function makeTubeMesh(points, colour, radius, options = {}) {
     return null;
   }
 
-  const curvePath = new THREE.CurvePath();
-
-  for (let index = 0; index < dedupedPoints.length - 1; index += 1) {
-    curvePath.add(new THREE.LineCurve3(dedupedPoints[index], dedupedPoints[index + 1]));
-  }
+  const curve = dedupedPoints.length === 2
+    ? new THREE.LineCurve3(dedupedPoints[0], dedupedPoints[1])
+    : new THREE.CatmullRomCurve3(dedupedPoints, false, 'centripetal', 0.32);
 
   const geometry = new THREE.TubeGeometry(
-    curvePath,
-    Math.max(24, dedupedPoints.length * 3),
+    curve,
+    Math.max(18, Math.round(dedupedPoints.length * (options.tubularSegmentScale ?? 3))),
     radius,
     options.radialSegments ?? 16,
     false
@@ -376,9 +383,8 @@ function makeStripedSharedSectionOverlay(section, project, options = {}) {
     const stripeCount = Math.max(colours.length, Math.ceil(length / SHARED_ROUTE_STRIPE_LENGTH));
 
     for (let stripeIndex = 0; stripeIndex < stripeCount; stripeIndex += 1) {
-      const overlap = Math.min(0.006, 0.2 / stripeCount);
-      const from = Math.max(0, stripeIndex / stripeCount - overlap);
-      const to = Math.min(1, (stripeIndex + 1) / stripeCount + overlap);
+      const from = stripeIndex / stripeCount;
+      const to = (stripeIndex + 1) / stripeCount;
       const segmentStart = start.clone().lerp(end, from);
       const segmentEnd = start.clone().lerp(end, to);
       const mesh = makeCylinderBetween(
@@ -388,7 +394,7 @@ function makeStripedSharedSectionOverlay(section, project, options = {}) {
         colours[(stripeOffset + stripeIndex) % colours.length],
         {
           opacity: options.opacity ?? 1,
-          radialSegments: 20,
+          radialSegments: options.radialSegments ?? 20,
           renderOrder: options.isFocused ? 22 : 18
         }
       );
@@ -559,6 +565,7 @@ function makeLabel(group, project, focusedLineId = 'all') {
   const position = project(group.coordinates, meanElevation);
   position.y += 25;
   object.position.copy(position);
+  object.userData = { isMajor };
 
   return object;
 }
@@ -593,10 +600,43 @@ function hoverLineMarkup(line) {
   `;
 }
 
+function disposeObjectResources(object) {
+  object.traverse((child) => {
+    if (child.geometry) {
+      child.geometry.dispose();
+    }
+
+    const materials = Array.isArray(child.material)
+      ? child.material
+      : [child.material].filter(Boolean);
+
+    materials.forEach((material) => {
+      material.dispose();
+    });
+
+    if (child.element) {
+      child.element.remove();
+    }
+  });
+}
+
+function disposeSceneResources(scene, renderer, labelRenderer) {
+  disposeObjectResources(scene);
+  renderer.dispose();
+  labelRenderer.domElement.remove();
+}
+
 export function createScene(container, networkData, options = {}) {
-  const { hoverEl, onReady, distortion = {}, initialViewState = null, focusedLineId = 'all' } = options;
+  const {
+    hoverEl,
+    onReady,
+    distortion = {},
+    initialViewState = null,
+    focusedLineId = 'all'
+  } = options;
   const hasLineFocus = focusedLineId !== 'all';
-  const project = computeProjection(networkData.scene, distortion);
+  const quality = RENDER_QUALITY;
+  let currentDistortion = { ...distortion };
 
   const scene = new THREE.Scene();
   scene.background = null;
@@ -613,7 +653,7 @@ export function createScene(container, networkData, options = {}) {
     antialias: true,
     alpha: true
   });
-  renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio, quality.pixelRatio));
   renderer.setSize(container.clientWidth, container.clientHeight);
   renderer.outputColorSpace = THREE.SRGBColorSpace;
   renderer.shadowMap.enabled = false;
@@ -657,153 +697,186 @@ export function createScene(container, networkData, options = {}) {
   rimLight.position.set(0, 1600, -1600);
   scene.add(rimLight);
 
-  const interactiveObjects = [];
-  const scenePoints = [];
-  const focusPoints = [];
+  let contentGroup = new THREE.Group();
+  let interactiveObjects = [];
+  let cameraFitPoints = [];
+  scene.add(contentGroup);
+  const raycaster = new THREE.Raycaster();
+  const pointer = new THREE.Vector2();
+  let hoveredObject = null;
+  let pointerFrameId = 0;
+  let latestPointerPosition = null;
 
   const sharedTrackSections = networkData.scene.sharedTrackSections ?? [];
 
   const displayLineSegments = buildUniqueLineRuns(networkData.scene.lineSegments);
 
-  displayLineSegments.forEach((segment) => {
-    if (hasLineFocus && segment.lineId !== focusedLineId) {
-      return;
-    }
+  function clearSceneContent() {
+    clearHover();
+    scene.remove(contentGroup);
+    disposeObjectResources(contentGroup);
+    contentGroup = new THREE.Group();
+    scene.add(contentGroup);
+    interactiveObjects = [];
+  }
 
-    const coordinateRuns = visibleCoordinateRuns(segment, sharedTrackSections, project);
-    const radius = lineRadiusFor(segment.lineId);
-    const isFocused = !hasLineFocus || segment.lineId === focusedLineId;
-    const routeOpacity = isFocused ? 1 : DIMMED_ROUTE_OPACITY;
-    const underlayOpacity = isFocused ? 1 : 0.08;
+  function buildSceneContent({ fitView = false } = {}) {
+    const project = computeProjection(networkData.scene, currentDistortion);
+    const scenePoints = [];
+    const focusPoints = [];
 
-    coordinateRuns.forEach((coordinates) => {
-      const points = coordinates.map(([lon, lat, elevation]) => project([lon, lat], elevation));
-      scenePoints.push(...points);
-      if (segment.lineId === focusedLineId) {
-        focusPoints.push(...points);
-      }
-      const underlayMesh = makeTubeMesh(points, darkenColour(segment.colour, 0.28), radius + 3.4, {
-        opacity: underlayOpacity,
-        roughness: 0.56
-      });
-      const lineMesh = makeTubeMesh(points, segment.colour, radius, {
-        emissive: segment.colour,
-        emissiveIntensity: 0.04,
-        opacity: routeOpacity,
-        roughness: 0.36
-      });
+    clearSceneContent();
 
-      if (!lineMesh) {
+    displayLineSegments.forEach((segment) => {
+      if (hasLineFocus && segment.lineId !== focusedLineId) {
         return;
       }
 
-      lineMesh.userData = {
-        type: 'line',
-        line: segment,
-        material: lineMesh.material,
-        baseColour: hexToColor(segment.colour).clone()
-      };
+      const coordinateRuns = visibleCoordinateRuns(segment, sharedTrackSections, project);
+      const radius = lineRadiusFor(segment.lineId);
+      const isFocused = !hasLineFocus || segment.lineId === focusedLineId;
+      const routeOpacity = isFocused ? 1 : DIMMED_ROUTE_OPACITY;
+      const underlayOpacity = isFocused ? 1 : 0.08;
 
-      if (underlayMesh) {
-        scene.add(underlayMesh);
-      }
+      coordinateRuns.forEach((coordinates) => {
+        const points = coordinates.map(([lon, lat, elevation]) => project([lon, lat], elevation));
+        scenePoints.push(...points);
+        if (segment.lineId === focusedLineId) {
+          focusPoints.push(...points);
+        }
+        const underlayMesh = makeTubeMesh(points, darkenColour(segment.colour, 0.28), radius + 3.4, {
+          opacity: underlayOpacity,
+          roughness: 0.56,
+          radialSegments: quality.tubeRadialSegments,
+          tubularSegmentScale: quality.tubeSegmentScale
+        });
+        const lineMesh = makeTubeMesh(points, segment.colour, radius, {
+          emissive: segment.colour,
+          emissiveIntensity: 0.04,
+          opacity: routeOpacity,
+          roughness: 0.36,
+          radialSegments: quality.tubeRadialSegments,
+          tubularSegmentScale: quality.tubeSegmentScale
+        });
 
-      interactiveObjects.push(lineMesh);
-      scene.add(lineMesh);
+        if (!lineMesh) {
+          return;
+        }
+
+        lineMesh.userData = {
+          type: 'line',
+          line: segment,
+          material: lineMesh.material,
+          baseColour: hexToColor(segment.colour).clone()
+        };
+
+        if (underlayMesh) {
+          contentGroup.add(underlayMesh);
+        }
+
+        interactiveObjects.push(lineMesh);
+        contentGroup.add(lineMesh);
+      });
     });
-  });
 
-  sharedTrackSections.forEach((section) => {
-    if (hasLineFocus && !section.lineIds?.includes(focusedLineId)) {
-      return;
-    }
-
-    const isFocused = !hasLineFocus || section.lineIds?.includes(focusedLineId);
-    const renderedSection = hasLineFocus
-      ? {
-        ...section,
-        lines: section.lines.filter((line) => line.lineId === focusedLineId)
+    sharedTrackSections.forEach((section) => {
+      if (hasLineFocus && !section.lineIds?.includes(focusedLineId)) {
+        return;
       }
-      : section;
-    const points = section.coordinates.map(([lon, lat, elevation]) => project([lon, lat], elevation));
 
-    if (section.lineIds?.includes(focusedLineId)) {
-      focusPoints.push(...points);
-    }
+      const isFocused = !hasLineFocus || section.lineIds?.includes(focusedLineId);
+      const renderedSection = hasLineFocus
+        ? {
+          ...section,
+          lines: section.lines.filter((line) => line.lineId === focusedLineId)
+        }
+        : section;
+      const points = section.coordinates.map(([lon, lat, elevation]) => project([lon, lat], elevation));
 
-    makeStripedSharedSectionOverlay(renderedSection, project, {
-      isFocused,
-      opacity: isFocused ? 1 : DIMMED_ROUTE_OPACITY
-    }).forEach((mesh) => {
-      scene.add(mesh);
+      if (section.lineIds?.includes(focusedLineId)) {
+        focusPoints.push(...points);
+      }
+
+      makeStripedSharedSectionOverlay(renderedSection, project, {
+        isFocused,
+        opacity: isFocused ? 1 : DIMMED_ROUTE_OPACITY,
+        radialSegments: quality.sharedRadialSegments
+      }).forEach((mesh) => {
+        contentGroup.add(mesh);
+      });
     });
-  });
 
-  networkData.scene.stationGroups.forEach((group) => {
-    if (hasLineFocus || group.nodes.length < 2) {
-      return;
-    }
-
-    for (let index = 0; index < group.nodes.length - 1; index += 1) {
-      if (
-        hasLineFocus &&
-        group.nodes[index].lineId !== focusedLineId &&
-        group.nodes[index + 1].lineId !== focusedLineId
-      ) {
-        continue;
+    networkData.scene.stationGroups.forEach((group) => {
+      if (hasLineFocus || group.nodes.length < 2) {
+        return;
       }
 
-      const start = project(group.nodes[index].coordinates, group.nodes[index].elevation);
-      const end = project(group.nodes[index + 1].coordinates, group.nodes[index + 1].elevation);
-      const connector = makeConnector(start, end);
+      for (let index = 0; index < group.nodes.length - 1; index += 1) {
+        if (
+          hasLineFocus &&
+          group.nodes[index].lineId !== focusedLineId &&
+          group.nodes[index + 1].lineId !== focusedLineId
+        ) {
+          continue;
+        }
 
-      if (connector) {
-        scene.add(connector);
+        const start = project(group.nodes[index].coordinates, group.nodes[index].elevation);
+        const end = project(group.nodes[index + 1].coordinates, group.nodes[index + 1].elevation);
+        const connector = makeConnector(start, end);
+
+        if (connector) {
+          contentGroup.add(connector);
+        }
       }
-    }
-  });
-
-  const visibleStationNodes = hasLineFocus
-    ? networkData.scene.stationNodes.filter((node) => node.lineId === focusedLineId)
-    : networkData.scene.stationNodes;
-
-  visibleStationNodes.forEach((node) => {
-    const isFocused = !hasLineFocus || node.lineId === focusedLineId;
-    const stationAnchor = makeStationNode(node, project, {
-      opacity: isFocused ? 1 : 0.2,
-      scale: isFocused ? 30 : 21
     });
-    scenePoints.push(stationAnchor.position.clone());
-    if (node.lineId === focusedLineId) {
-      focusPoints.push(stationAnchor.position.clone());
+
+    const visibleStationNodes = hasLineFocus
+      ? networkData.scene.stationNodes.filter((node) => node.lineId === focusedLineId)
+      : networkData.scene.stationNodes;
+    const majorStationIds = new Set(networkData.scene.stationGroups
+      .filter((group) => group.importance >= 12 || group.nodes.length > 2)
+      .flatMap((group) => group.nodes.map((node) => node.id)));
+
+    visibleStationNodes.forEach((node) => {
+      const isFocused = !hasLineFocus || node.lineId === focusedLineId;
+      const stationAnchor = makeStationNode(node, project, {
+        opacity: isFocused ? 1 : 0.2,
+        scale: (isFocused ? 30 : 21) * quality.stationScale
+      });
+      scenePoints.push(stationAnchor.position.clone());
+      if (node.lineId === focusedLineId) {
+        focusPoints.push(stationAnchor.position.clone());
+      }
+      stationAnchor.userData.isMajor = majorStationIds.has(node.id);
+      interactiveObjects.push(stationAnchor);
+      contentGroup.add(stationAnchor);
+    });
+
+    const labelSourceGroups = hasLineFocus
+      ? networkData.scene.stationGroups.filter((group) => group.nodes.some((node) => node.lineId === focusedLineId))
+      : networkData.scene.stationGroups;
+    const mobileLabelLimit = Math.round((hasLineFocus ? 72 : 44) * quality.labelScale);
+    const desktopLabelLimit = labelSourceGroups.length;
+    const labelLimit = container.clientWidth < 720 ? mobileLabelLimit : desktopLabelLimit;
+    const minLabelDistance = container.clientWidth < 720
+      ? (hasLineFocus ? 56 : 76)
+      : 0;
+
+    selectLabelGroups(labelSourceGroups, project, labelLimit, minLabelDistance).forEach(({ group }) => {
+      contentGroup.add(makeLabel(group, project, focusedLineId));
+    });
+
+    cameraFitPoints = hasLineFocus && focusPoints.length > 1 ? focusPoints : scenePoints;
+
+    if (fitView) {
+      fitCamera(camera, controls, cameraFitPoints, container.clientWidth, container.clientHeight, {
+        closeCrop: hasLineFocus
+      });
     }
-    interactiveObjects.push(stationAnchor);
-    scene.add(stationAnchor);
-  });
+  }
 
-  const labelSourceGroups = hasLineFocus
-    ? networkData.scene.stationGroups.filter((group) => group.nodes.some((node) => node.lineId === focusedLineId))
-    : networkData.scene.stationGroups;
-  const mobileLabelLimit = hasLineFocus ? 72 : 44;
-  const desktopLabelLimit = labelSourceGroups.length;
-  const labelLimit = container.clientWidth < 720 ? mobileLabelLimit : desktopLabelLimit;
-  const minLabelDistance = container.clientWidth < 720
-    ? (hasLineFocus ? 56 : 76)
-    : 0;
-
-  selectLabelGroups(labelSourceGroups, project, labelLimit, minLabelDistance).forEach(({ group }) => {
-    scene.add(makeLabel(group, project, focusedLineId));
-  });
-
-  let cameraFitPoints = hasLineFocus && focusPoints.length > 1 ? focusPoints : scenePoints;
-  fitCamera(camera, controls, cameraFitPoints, container.clientWidth, container.clientHeight, {
-    closeCrop: hasLineFocus
-  });
+  buildSceneContent({ fitView: true });
   applyViewState(camera, controls, initialViewState);
-
-  const raycaster = new THREE.Raycaster();
-  const pointer = new THREE.Vector2();
-  let hoveredObject = null;
 
   function clearHover() {
     if (!hoveredObject) {
@@ -846,10 +919,21 @@ export function createScene(container, networkData, options = {}) {
     }
   }
 
-  function onPointerMove(event) {
+  function processPointerMove() {
+    pointerFrameId = 0;
+
+    if (!latestPointerPosition) {
+      return;
+    }
+
     const rect = renderer.domElement.getBoundingClientRect();
-    pointer.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
-    pointer.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
+
+    if (rect.width === 0 || rect.height === 0) {
+      return;
+    }
+
+    pointer.x = ((latestPointerPosition.clientX - rect.left) / rect.width) * 2 - 1;
+    pointer.y = -((latestPointerPosition.clientY - rect.top) / rect.height) * 2 + 1;
     raycaster.setFromCamera(pointer, camera);
 
     const intersections = raycaster.intersectObjects(interactiveObjects, true);
@@ -865,7 +949,24 @@ export function createScene(container, networkData, options = {}) {
     clearHover();
   }
 
+  function onPointerMove(event) {
+    latestPointerPosition = {
+      clientX: event.clientX,
+      clientY: event.clientY
+    };
+
+    if (!pointerFrameId) {
+      pointerFrameId = window.requestAnimationFrame(processPointerMove);
+    }
+  }
+
   function onPointerLeave() {
+    if (pointerFrameId) {
+      window.cancelAnimationFrame(pointerFrameId);
+      pointerFrameId = 0;
+    }
+
+    latestPointerPosition = null;
     clearHover();
   }
 
@@ -900,13 +1001,20 @@ export function createScene(container, networkData, options = {}) {
   onReady?.();
 
   return {
+    updateDistortion(nextDistortion) {
+      currentDistortion = { ...nextDistortion };
+      buildSceneContent({ fitView: false });
+    },
     destroy() {
       window.cancelAnimationFrame(animationFrameId);
+      if (pointerFrameId) {
+        window.cancelAnimationFrame(pointerFrameId);
+      }
       resizeObserver.disconnect();
       renderer.domElement.removeEventListener('pointermove', onPointerMove);
       renderer.domElement.removeEventListener('pointerleave', onPointerLeave);
       controls.dispose();
-      renderer.dispose();
+      disposeSceneResources(scene, renderer, labelRenderer);
       container.innerHTML = '';
     },
     getViewState() {
