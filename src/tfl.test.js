@@ -1,47 +1,12 @@
 import { describe, expect, it } from 'vitest';
 import { fetchNetworkData, getStationDepthRecord, normaliseRouteSequence } from './tfl.js';
 
-function createStorage(initialValue) {
-  const values = new Map();
-
-  if (initialValue) {
-    values.set('subsurface.network.v12', JSON.stringify(initialValue));
-  }
-
-  return {
-    getItem(key) {
-      return values.has(key) ? values.get(key) : null;
-    },
-    setItem(key, value) {
-      values.set(key, value);
-    }
-  };
-}
-
 function createJsonResponse(data) {
   return {
     ok: true,
     async json() {
       return data;
     }
-  };
-}
-
-function createRenderableScene() {
-  return {
-    lineSegments: [
-      {
-        coordinates: [[-0.1, 51.5, -10]]
-      }
-    ],
-    stationNodes: [
-      {
-        stationId: 'A',
-        coordinates: [-0.1, 51.5],
-        elevation: -10
-      }
-    ],
-    stationGroups: []
   };
 }
 
@@ -131,6 +96,70 @@ describe('normaliseRouteSequence', () => {
     expect(result.stationFeatures[0].properties.lineId).toBe('northern');
   });
 
+  it('uses the TfL id when stationId is blank', () => {
+    const lineMeta = {
+      id: 'piccadilly',
+      name: 'Piccadilly',
+      modeName: 'tube'
+    };
+    const routeSequence = {
+      lineStrings: ['[[[-0.454037,51.471618],[-0.446419,51.458837],[-0.489556,51.471569]]]'],
+      stations: [
+        {
+          stationId: '',
+          id: 'HUBH13',
+          name: 'Heathrow Terminals 2 & 3',
+          lat: 51.471618,
+          lon: -0.454037,
+          zone: '6',
+          modes: ['tube'],
+          lines: [{ id: 'piccadilly' }]
+        },
+        {
+          stationId: '',
+          id: 'HUBHX4',
+          name: 'Heathrow Airport Terminal 4',
+          lat: 51.458837,
+          lon: -0.446419,
+          zone: '6',
+          modes: ['tube'],
+          lines: [{ id: 'piccadilly' }]
+        }
+      ]
+    };
+
+    const result = normaliseRouteSequence(lineMeta, routeSequence);
+
+    expect(result.stationFeatures.map((feature) => feature.properties.stationId)).toEqual([
+      'HUBH13',
+      'HUBHX4'
+    ]);
+  });
+
+  it('deduplicates route geometries that TfL supplies in both directions', () => {
+    const lineMeta = {
+      id: 'piccadilly',
+      name: 'Piccadilly',
+      modeName: 'tube'
+    };
+    const routeSequence = {
+      lineStrings: [
+        '[[[-0.314719,51.499319],[-0.452265,51.471235],[-0.49056,51.470052]]]',
+        '[[[-0.49056,51.470052],[-0.452265,51.471235],[-0.314719,51.499319]]]'
+      ],
+      stations: []
+    };
+
+    const result = normaliseRouteSequence(lineMeta, routeSequence);
+
+    expect(result.lineFeatures).toHaveLength(1);
+    expect(result.lineFeatures[0].geometry.coordinates).toEqual([
+      [-0.314719, 51.499319],
+      [-0.452265, 51.471235],
+      [-0.49056, 51.470052]
+    ]);
+  });
+
   it('removes the Underground Station suffix from station labels', () => {
     const lineMeta = {
       id: 'victoria',
@@ -185,61 +214,7 @@ describe('normaliseRouteSequence', () => {
 });
 
 describe('fetchNetworkData', () => {
-  it('uses a fresh cache instead of refetching', async () => {
-    const cachedData = {
-      lines: { type: 'FeatureCollection', features: [] },
-      stations: { type: 'FeatureCollection', features: [] },
-      scene: createRenderableScene(),
-      lineCount: 12,
-      stationCount: 272
-    };
-    const storage = createStorage({
-      cachedAt: 1_000,
-      data: cachedData
-    });
-    let fetchCount = 0;
-
-    const result = await fetchNetworkData({
-      storage,
-      now: 2_000,
-      fetchImpl: async () => {
-        fetchCount += 1;
-        throw new Error('should not fetch');
-      }
-    });
-
-    expect(fetchCount).toBe(0);
-    expect(result.source).toBe('cache');
-    expect(result.stationCount).toBe(272);
-  });
-
-  it('falls back to stale cache if the live refresh fails', async () => {
-    const cachedData = {
-      lines: { type: 'FeatureCollection', features: [] },
-      stations: { type: 'FeatureCollection', features: [] },
-      scene: createRenderableScene(),
-      lineCount: 12,
-      stationCount: 270
-    };
-    const storage = createStorage({
-      cachedAt: 1_000,
-      data: cachedData
-    });
-
-    const result = await fetchNetworkData({
-      storage,
-      now: 1_000 + 1000 * 60 * 60 * 25,
-      fetchImpl: async () => {
-        throw new Error('TfL unavailable');
-      }
-    });
-
-    expect(result.source).toBe('stale-cache');
-    expect(result.stationCount).toBe(270);
-  });
-
-  it('fetches live data and writes it to cache when there is no cache', async () => {
-    const storage = createStorage();
+  it('fetches live data without browser storage', async () => {
     const calls = [];
     const lineMeta = [
       { id: 'bakerloo', name: 'Bakerloo', modeName: 'tube' },
@@ -262,7 +237,6 @@ describe('fetchNetworkData', () => {
     };
 
     const result = await fetchNetworkData({
-      storage,
       now: 5_000,
       fetchImpl: async (url) => {
         calls.push(url);
@@ -280,11 +254,9 @@ describe('fetchNetworkData', () => {
     expect(result.stationCount).toBe(1);
     expect(calls).toHaveLength(3);
     expect(result.scene.lineSegments[0].coordinates[0]).toHaveLength(3);
-    expect(storage.getItem('subsurface.network.v12')).toContain('"cachedAt":5000');
   });
 
   it('snaps stations onto the nearest served line geometry', async () => {
-    const storage = createStorage();
     const lineMeta = [{ id: 'bakerloo', name: 'Bakerloo', modeName: 'tube' }];
     const routeSequence = {
       lineStrings: ['[[[-0.1,51.5],[-0.1,51.52]]]'],
@@ -303,7 +275,6 @@ describe('fetchNetworkData', () => {
     };
 
     const result = await fetchNetworkData({
-      storage,
       now: 5_000,
       fetchImpl: async (url) => {
         if (url.includes('/Line/Mode/tube,elizabeth-line/Route')) {
@@ -356,12 +327,32 @@ describe('station depth data', () => {
     expect(bondStreet.source).toBe('station-depths.csv');
   });
 
-  it('approximates Elizabeth line Heathrow levels from Piccadilly platforms', () => {
+  it('uses explicit Elizabeth line Heathrow platform rows where available', () => {
     const piccadilly = getStationDepthRecord('Heathrow Terminal 5', 'piccadilly');
     const elizabeth = getStationDepthRecord('Heathrow Terminal 5', 'elizabeth');
 
-    expect(elizabeth.platformHeightMetres).toBeCloseTo(piccadilly.platformHeightMetres, 8);
-    expect(elizabeth.source).toContain('Piccadilly platform row');
+    expect(piccadilly.platformHeightMetres).toBeCloseTo(10.3, 8);
+    expect(elizabeth.platformHeightMetres).toBeCloseTo(-10, 8);
+    expect(elizabeth.source).toBe('station-depths.csv');
+  });
+
+  it('matches TfL Heathrow Terminals 2 & 3 naming to the depth row', () => {
+    const piccadilly = getStationDepthRecord('Heathrow Terminals 2 & 3', 'piccadilly');
+    const compactPiccadilly = getStationDepthRecord('Heathrow Terminals 2&3', 'piccadilly');
+    const elizabeth = getStationDepthRecord('Heathrow Terminals 2 & 3', 'elizabeth');
+
+    expect(piccadilly.platformHeightMetres).toBeCloseTo(9.6, 8);
+    expect(compactPiccadilly.platformHeightMetres).toBeCloseTo(9.6, 8);
+    expect(elizabeth.platformHeightMetres).toBeCloseTo(-10, 8);
+    expect(elizabeth.source).toBe('station-depths.csv');
+  });
+
+  it('matches TfL Heathrow Airport Terminal names to the depth rows', () => {
+    const terminal4 = getStationDepthRecord('Heathrow Airport Terminal 4', 'piccadilly');
+    const terminal5 = getStationDepthRecord('Heathrow Airport Terminal 5', 'piccadilly');
+
+    expect(terminal4.platformHeightMetres).toBeCloseTo(12.9, 8);
+    expect(terminal5.platformHeightMetres).toBeCloseTo(10.3, 8);
   });
 
   it('uses surface-level fallback for Elizabeth line stations without depth data', () => {
@@ -373,7 +364,6 @@ describe('station depth data', () => {
   });
 
   it('marks shared track by consecutive station pairs rather than exact route vertices', async () => {
-    const storage = createStorage();
     const lineMeta = [
       { id: 'circle', name: 'Circle', modeName: 'tube' },
       { id: 'hammersmith-city', name: 'Hammersmith & City', modeName: 'tube' }
@@ -405,7 +395,6 @@ describe('station depth data', () => {
     };
 
     const result = await fetchNetworkData({
-      storage,
       now: 5_000,
       fetchImpl: async (url) => {
         if (url.includes('/Line/Mode/tube,elizabeth-line/Route')) {
@@ -424,7 +413,6 @@ describe('station depth data', () => {
   });
 
   it('groups all co-running lines for the same consecutive station pair', async () => {
-    const storage = createStorage();
     const lineMeta = [
       { id: 'circle', name: 'Circle', modeName: 'tube' },
       { id: 'hammersmith-city', name: 'Hammersmith & City', modeName: 'tube' },
@@ -454,7 +442,6 @@ describe('station depth data', () => {
     ];
 
     const result = await fetchNetworkData({
-      storage,
       now: 5_000,
       fetchImpl: async (url) => {
         if (url.includes('/Line/Mode/tube,elizabeth-line/Route')) {
@@ -476,5 +463,176 @@ describe('station depth data', () => {
       'hammersmith-city',
       'metropolitan'
     ]);
+  });
+
+  it('does not mark lines at different platform levels as shared just because station pairs match', async () => {
+    const lineMeta = [
+      { id: 'district', name: 'District', modeName: 'tube' },
+      { id: 'piccadilly', name: 'Piccadilly', modeName: 'tube' }
+    ];
+    const stations = [
+      {
+        stationId: '940GZZLUSKS',
+        id: '940GZZLUSKS',
+        name: 'South Kensington Underground Station',
+        lat: 51.4941,
+        lon: -0.1738,
+        zone: '1',
+        modes: ['tube'],
+        lines: lineMeta.map(({ id }) => ({ id }))
+      },
+      {
+        stationId: '940GZZLUGTR',
+        id: '940GZZLUGTR',
+        name: 'Gloucester Road Underground Station',
+        lat: 51.4945,
+        lon: -0.1829,
+        zone: '1',
+        modes: ['tube'],
+        lines: lineMeta.map(({ id }) => ({ id }))
+      }
+    ];
+
+    const result = await fetchNetworkData({
+      now: 5_000,
+      fetchImpl: async (url) => {
+        if (url.includes('/Line/Mode/tube,elizabeth-line/Route')) {
+          return createJsonResponse(lineMeta);
+        }
+
+        return createJsonResponse({
+          lineStrings: ['[[[-0.1738,51.4941],[-0.178,51.4943],[-0.1829,51.4945]]]'],
+          stations
+        });
+      }
+    });
+
+    expect(result.scene.sharedTrackSections).toHaveLength(0);
+  });
+
+  it('does not treat Elizabeth line Heathrow stations as shared Piccadilly track', async () => {
+    const lineMeta = [
+      { id: 'elizabeth', name: 'Elizabeth line', modeName: 'elizabeth-line' },
+      { id: 'piccadilly', name: 'Piccadilly', modeName: 'tube' }
+    ];
+    const stations = [
+      {
+        stationId: '910GHTRWTM5',
+        id: '910GHTRWTM5',
+        name: 'Heathrow Terminal 5 Rail Station',
+        lat: 51.4723,
+        lon: -0.4877,
+        zone: '6',
+        modes: ['tube', 'elizabeth-line'],
+        lines: lineMeta.map(({ id }) => ({ id }))
+      },
+      {
+        stationId: '940GZZLUHRC',
+        id: '940GZZLUHRC',
+        name: 'Heathrow Terminals 2 & 3 Underground Station',
+        lat: 51.4713,
+        lon: -0.4524,
+        zone: '6',
+        modes: ['tube', 'elizabeth-line'],
+        lines: lineMeta.map(({ id }) => ({ id }))
+      }
+    ];
+
+    const result = await fetchNetworkData({
+      now: 5_000,
+      fetchImpl: async (url) => {
+        if (url.includes('/Line/Mode/tube,elizabeth-line/Route')) {
+          return createJsonResponse(lineMeta);
+        }
+
+        return createJsonResponse({
+          lineStrings: ['[[[-0.4877,51.4723],[-0.4524,51.4713]]]'],
+          stations
+        });
+      }
+    });
+
+    expect(result.scene.stationNodes.some((node) =>
+      node.lineId === 'piccadilly' && node.name === 'Heathrow Terminals 2 & 3'
+    )).toBe(true);
+    expect(result.scene.sharedTrackSections).toHaveLength(0);
+  });
+
+  it('builds separate Piccadilly station nodes for blank-id Heathrow hubs', async () => {
+    const lineMeta = [{ id: 'piccadilly', name: 'Piccadilly', modeName: 'tube' }];
+    const routeSequence = {
+      lineStrings: [
+        '[[[-0.423191,51.466747],[-0.452265,51.471235],[-0.49056,51.470052]]]',
+        '[[[-0.423191,51.466747],[-0.452265,51.471235],[-0.445771,51.458524]]]'
+      ],
+      stations: [
+        {
+          stationId: '',
+          id: 'HUBH13',
+          name: 'Heathrow Terminals 2 & 3',
+          lat: 51.471618,
+          lon: -0.454037,
+          zone: '6',
+          modes: ['tube'],
+          lines: [{ id: 'piccadilly' }]
+        },
+        {
+          stationId: '',
+          id: 'HUBHX4',
+          name: 'Heathrow Airport Terminal 4',
+          lat: 51.458837,
+          lon: -0.446419,
+          zone: '6',
+          modes: ['tube'],
+          lines: [{ id: 'piccadilly' }]
+        },
+        {
+          stationId: '',
+          id: 'HUBHX5',
+          name: 'Heathrow Airport Terminal 5',
+          lat: 51.471569,
+          lon: -0.489556,
+          zone: '6',
+          modes: ['tube'],
+          lines: [{ id: 'piccadilly' }]
+        }
+      ]
+    };
+
+    const result = await fetchNetworkData({
+      fetchImpl: async (url) => {
+        if (url.includes('/Line/Mode/tube,elizabeth-line/Route')) {
+          return createJsonResponse(lineMeta);
+        }
+
+        return createJsonResponse(routeSequence);
+      }
+    });
+
+    const heathrowNodes = result.scene.stationNodes
+      .filter((node) => node.lineId === 'piccadilly' && node.name.includes('Heathrow'))
+      .sort((left, right) => left.stationId.localeCompare(right.stationId));
+
+    expect(heathrowNodes.map((node) => node.stationId)).toEqual([
+      'heathrow:heathrow airport terminal 1, 2 & 3',
+      'heathrow:heathrow terminal 4',
+      'heathrow:heathrow terminal 5'
+    ]);
+    expect(heathrowNodes.map((node) => node.sourceStationId)).toEqual(['HUBH13', 'HUBHX4', 'HUBHX5']);
+    expect(heathrowNodes.map((node) => node.depthSource)).toEqual([
+      'station-depths.csv',
+      'station-depths.csv',
+      'station-depths.csv'
+    ]);
+
+    const terminal4Branch = result.scene.lineSegments.find((segment) =>
+      segment.coordinates.some(([lon, lat]) => lon === -0.445771 && lat === 51.458524)
+    );
+    const terminal5Branch = result.scene.lineSegments.find((segment) =>
+      segment.coordinates.some(([lon, lat]) => lon === -0.49056 && lat === 51.470052)
+    );
+
+    expect(terminal4Branch.coordinates.at(-1)[2]).toBeCloseTo(12.9, 8);
+    expect(terminal5Branch.coordinates.at(-1)[2]).toBeCloseTo(10.3, 8);
   });
 });

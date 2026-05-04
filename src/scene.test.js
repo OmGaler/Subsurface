@@ -1,5 +1,10 @@
 import { describe, expect, it } from 'vitest';
-import { computeProjection, selectLabelGroups, visibleCoordinateRuns } from './scene.js';
+import {
+  buildUniqueLineRuns,
+  computeProjection,
+  selectLabelGroups,
+  visibleCoordinateRuns
+} from './scene.js';
 
 const sceneData = {
   lineSegments: [
@@ -92,5 +97,83 @@ describe('visibleCoordinateRuns', () => {
         [-0.12, 51.526, -8]
       ]
     ]);
+  });
+});
+
+describe('buildUniqueLineRuns', () => {
+  it('renders overlapping branches of the same line once before splitting', () => {
+    const runs = buildUniqueLineRuns([
+      {
+        lineId: 'piccadilly',
+        lineName: 'Piccadilly',
+        colour: '#0019a8',
+        coordinates: [
+          [-0.31, 51.49, -10],
+          [-0.45, 51.47, -10],
+          [-0.49, 51.47, -10]
+        ]
+      },
+      {
+        lineId: 'piccadilly',
+        lineName: 'Piccadilly',
+        colour: '#0019a8',
+        coordinates: [
+          [-0.31, 51.49, -10],
+          [-0.45, 51.47, -10],
+          [-0.44, 51.46, -10]
+        ]
+      }
+    ]);
+
+    expect(runs.map((run) => run.coordinates)).toEqual(expect.arrayContaining([
+      [
+        [-0.31, 51.49, -10],
+        [-0.45, 51.47, -10]
+      ],
+      [
+        [-0.45, 51.47, -10],
+        [-0.49, 51.47, -10]
+      ],
+      [
+        [-0.45, 51.47, -10],
+        [-0.44, 51.46, -10]
+      ]
+    ]));
+    expect(runs).toHaveLength(3);
+  });
+
+  it('keeps same-line runs separate when matching horizontal geometry has different elevations', () => {
+    const runs = buildUniqueLineRuns([
+      {
+        lineId: 'piccadilly',
+        lineName: 'Piccadilly',
+        colour: '#0019a8',
+        coordinates: [
+          [-0.49, 51.47, 10],
+          [-0.45, 51.47, 12]
+        ]
+      },
+      {
+        lineId: 'piccadilly',
+        lineName: 'Piccadilly',
+        colour: '#0019a8',
+        coordinates: [
+          [-0.49, 51.47, -10],
+          [-0.45, 51.47, -8]
+        ]
+      }
+    ]);
+
+    expect(runs.map((run) => run.coordinates)).toEqual(expect.arrayContaining([
+      [
+        [-0.49, 51.47, 10],
+        [-0.45, 51.47, 12]
+      ],
+      [
+        [-0.49, 51.47, -10],
+        [-0.45, 51.47, -8]
+      ]
+    ]));
+    expect(runs).toHaveLength(2);
   });
 });

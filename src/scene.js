@@ -69,6 +69,127 @@ function tubePoints(segment, project) {
   return segment.coordinates.map(([lon, lat, elevation]) => project([lon, lat], elevation));
 }
 
+function displayNodeKey([lon, lat, elevation = 0]) {
+  return `${lon.toFixed(6)},${lat.toFixed(6)},${elevation.toFixed(3)}`;
+}
+
+function edgeKey(leftKey, rightKey) {
+  return [leftKey, rightKey].sort().join('|');
+}
+
+export function buildUniqueLineRuns(lineSegments) {
+  const linesById = new Map();
+
+  lineSegments.forEach((segment) => {
+    let line = linesById.get(segment.lineId);
+
+    if (!line) {
+      line = {
+        segment,
+        nodes: new Map(),
+        edges: new Map(),
+        adjacency: new Map()
+      };
+      linesById.set(segment.lineId, line);
+    }
+
+    segment.coordinates.forEach((coordinate, index) => {
+      const currentKey = displayNodeKey(coordinate);
+
+      line.nodes.set(currentKey, line.nodes.get(currentKey) ?? coordinate);
+
+      if (index === segment.coordinates.length - 1) {
+        return;
+      }
+
+      const next = segment.coordinates[index + 1];
+      const nextKey = displayNodeKey(next);
+      const key = edgeKey(currentKey, nextKey);
+
+      line.nodes.set(nextKey, line.nodes.get(nextKey) ?? next);
+
+      if (line.edges.has(key)) {
+        return;
+      }
+
+      line.edges.set(key, {
+        key,
+        leftKey: currentKey,
+        rightKey: nextKey
+      });
+
+      [currentKey, nextKey].forEach((nodeKey) => {
+        line.adjacency.set(nodeKey, line.adjacency.get(nodeKey) ?? []);
+      });
+      line.adjacency.get(currentKey).push(key);
+      line.adjacency.get(nextKey).push(key);
+    });
+  });
+
+  return Array.from(linesById.values()).flatMap((line) => {
+    const visitedEdges = new Set();
+    const runs = [];
+
+    function otherNodeKey(edge, nodeKey) {
+      return edge.leftKey === nodeKey ? edge.rightKey : edge.leftKey;
+    }
+
+    function walkRun(startKey, firstEdgeKey) {
+      const coordinates = [line.nodes.get(startKey)];
+      let currentKey = startKey;
+      let edgeToWalkKey = firstEdgeKey;
+
+      while (edgeToWalkKey && !visitedEdges.has(edgeToWalkKey)) {
+        const edge = line.edges.get(edgeToWalkKey);
+        visitedEdges.add(edgeToWalkKey);
+
+        const nextKey = otherNodeKey(edge, currentKey);
+        coordinates.push(line.nodes.get(nextKey));
+        currentKey = nextKey;
+
+        const nextEdges = line.adjacency.get(currentKey).filter((key) => !visitedEdges.has(key));
+        edgeToWalkKey = line.adjacency.get(currentKey).length === 2 ? nextEdges[0] : null;
+      }
+
+      return coordinates;
+    }
+
+    Array.from(line.adjacency.entries())
+      .filter(([, edges]) => edges.length !== 2)
+      .forEach(([nodeKey, edges]) => {
+        edges.forEach((key) => {
+          if (visitedEdges.has(key)) {
+            return;
+          }
+
+          const coordinates = walkRun(nodeKey, key);
+
+          if (coordinates.length > 1) {
+            runs.push(coordinates);
+          }
+        });
+      });
+
+    line.edges.forEach((edge) => {
+      if (visitedEdges.has(edge.key)) {
+        return;
+      }
+
+      const coordinates = walkRun(edge.leftKey, edge.key);
+
+      if (coordinates.length > 1) {
+        runs.push(coordinates);
+      }
+    });
+
+    return runs.map((coordinates, index) => ({
+      ...line.segment,
+      id: `${line.segment.lineId}-display-${index}`,
+      coordinates
+    }));
+  });
+}
+
 function pointToSegmentDistanceSquared(point, start, end) {
   const spanX = end.x - start.x;
   const spanZ = end.z - start.z;
@@ -333,7 +454,7 @@ function makeStationNode(node, project, options = {}) {
     })
   );
   sprite.renderOrder = 40;
-  const scale = options.scale ?? 22;
+  const scale = options.scale ?? 26;
   sprite.scale.set(scale, scale, 1);
 
   anchor.add(sprite);
@@ -365,7 +486,12 @@ function makeConnector(start, end) {
   return connector;
 }
 
-export function selectLabelGroups(stationGroups, project, labelLimit = DESKTOP_LABEL_LIMIT) {
+export function selectLabelGroups(
+  stationGroups,
+  project,
+  labelLimit = DESKTOP_LABEL_LIMIT,
+  minLabelDistance = MIN_LABEL_DISTANCE
+) {
   const selected = [];
 
   stationGroups
@@ -379,7 +505,7 @@ export function selectLabelGroups(stationGroups, project, labelLimit = DESKTOP_L
       const meanElevation =
         group.nodes.reduce((sum, node) => sum + node.elevation, 0) / Math.max(1, group.nodes.length);
       const position = project(group.coordinates, meanElevation);
-      const isTooClose = selected.some((item) => item.position.distanceTo(position) < MIN_LABEL_DISTANCE);
+      const isTooClose = selected.some((item) => item.position.distanceTo(position) < minLabelDistance);
 
       if (!isTooClose) {
         selected.push({ group, position });
@@ -537,7 +663,13 @@ export function createScene(container, networkData, options = {}) {
 
   const sharedTrackSections = networkData.scene.sharedTrackSections ?? [];
 
-  networkData.scene.lineSegments.forEach((segment) => {
+  const displayLineSegments = buildUniqueLineRuns(networkData.scene.lineSegments);
+
+  displayLineSegments.forEach((segment) => {
+    if (hasLineFocus && segment.lineId !== focusedLineId) {
+      return;
+    }
+
     const coordinateRuns = visibleCoordinateRuns(segment, sharedTrackSections, project);
     const radius = lineRadiusFor(segment.lineId);
     const isFocused = !hasLineFocus || segment.lineId === focusedLineId;
@@ -582,14 +714,24 @@ export function createScene(container, networkData, options = {}) {
   });
 
   sharedTrackSections.forEach((section) => {
+    if (hasLineFocus && !section.lineIds?.includes(focusedLineId)) {
+      return;
+    }
+
     const isFocused = !hasLineFocus || section.lineIds?.includes(focusedLineId);
+    const renderedSection = hasLineFocus
+      ? {
+        ...section,
+        lines: section.lines.filter((line) => line.lineId === focusedLineId)
+      }
+      : section;
     const points = section.coordinates.map(([lon, lat, elevation]) => project([lon, lat], elevation));
 
     if (section.lineIds?.includes(focusedLineId)) {
       focusPoints.push(...points);
     }
 
-    makeStripedSharedSectionOverlay(section, project, {
+    makeStripedSharedSectionOverlay(renderedSection, project, {
       isFocused,
       opacity: isFocused ? 1 : DIMMED_ROUTE_OPACITY
     }).forEach((mesh) => {
@@ -598,7 +740,7 @@ export function createScene(container, networkData, options = {}) {
   });
 
   networkData.scene.stationGroups.forEach((group) => {
-    if (group.nodes.length < 2) {
+    if (hasLineFocus || group.nodes.length < 2) {
       return;
     }
 
@@ -621,11 +763,15 @@ export function createScene(container, networkData, options = {}) {
     }
   });
 
-  networkData.scene.stationNodes.forEach((node) => {
+  const visibleStationNodes = hasLineFocus
+    ? networkData.scene.stationNodes.filter((node) => node.lineId === focusedLineId)
+    : networkData.scene.stationNodes;
+
+  visibleStationNodes.forEach((node) => {
     const isFocused = !hasLineFocus || node.lineId === focusedLineId;
     const stationAnchor = makeStationNode(node, project, {
       opacity: isFocused ? 1 : 0.2,
-      scale: isFocused ? 24 : 16
+      scale: isFocused ? 30 : 21
     });
     scenePoints.push(stationAnchor.position.clone());
     if (node.lineId === focusedLineId) {
@@ -635,14 +781,17 @@ export function createScene(container, networkData, options = {}) {
     scene.add(stationAnchor);
   });
 
-  const mobileLabelLimit = hasLineFocus ? 24 : 3;
-  const desktopLabelLimit = hasLineFocus ? 88 : 62;
-  const labelLimit = container.clientWidth < 720 ? mobileLabelLimit : desktopLabelLimit;
   const labelSourceGroups = hasLineFocus
     ? networkData.scene.stationGroups.filter((group) => group.nodes.some((node) => node.lineId === focusedLineId))
     : networkData.scene.stationGroups;
+  const mobileLabelLimit = hasLineFocus ? 72 : 44;
+  const desktopLabelLimit = labelSourceGroups.length;
+  const labelLimit = container.clientWidth < 720 ? mobileLabelLimit : desktopLabelLimit;
+  const minLabelDistance = container.clientWidth < 720
+    ? (hasLineFocus ? 56 : 76)
+    : 0;
 
-  selectLabelGroups(labelSourceGroups, project, labelLimit).forEach(({ group }) => {
+  selectLabelGroups(labelSourceGroups, project, labelLimit, minLabelDistance).forEach(({ group }) => {
     scene.add(makeLabel(group, project, focusedLineId));
   });
 

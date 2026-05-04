@@ -2,12 +2,12 @@ import { INCLUDED_LINE_IDS, LINE_COLOURS } from './constants.js';
 import stationDepthCsv from '../data/station-depths.csv?raw';
 
 const API_BASE = 'https://api.tfl.gov.uk';
-const CACHE_KEY = 'subsurface.network.v12';
-const CACHE_TTL_MS = 1000 * 60 * 60 * 24;
 const LONDON_CORE = [-0.118092, 51.509865];
 const PLATFORM_HEIGHT_OFFSET_METRES = 100;
 const DEPTH_SOURCE = 'station-depths.csv';
 const LINE_STATION_BRANCH_MAX_DISTANCE_METRES = 75;
+const SHARED_TRACK_MAX_ELEVATION_GAP_METRES = 7;
+const NON_SHARED_LINE_IDS = new Set(['elizabeth']);
 
 const CSV_LINE_NAMES = {
   Bakerloo: 'bakerloo',
@@ -93,10 +93,31 @@ function parseCsvLine(line) {
 }
 
 function normaliseLookupName(name) {
-  return formatStationName(name)
+  const lookupName = formatStationName(name)
+    .replace(/\s*&\s*/g, ' & ')
     .replace(/\s+/g, ' ')
     .trim()
     .toLowerCase();
+
+  if (lookupName === 'heathrow terminals 2 & 3') {
+    return 'heathrow airport terminal 1, 2 & 3';
+  }
+
+  if (/^heathrow airport terminal [45]$/.test(lookupName)) {
+    return lookupName.replace('heathrow airport terminal', 'heathrow terminal');
+  }
+
+  return lookupName;
+}
+
+function stationGroupId(stationId, stationName) {
+  const lookupName = normaliseLookupName(stationName);
+
+  if (lookupName.includes('heathrow')) {
+    return `heathrow:${lookupName}`;
+  }
+
+  return stationId;
 }
 
 function mean(values) {
@@ -200,52 +221,6 @@ function formatStationName(name) {
     .trim();
 }
 
-function readCache(storage, now) {
-  if (!storage?.getItem) {
-    return null;
-  }
-
-  const rawValue = storage.getItem(CACHE_KEY);
-
-  if (!rawValue) {
-    return null;
-  }
-
-  try {
-    const cached = JSON.parse(rawValue);
-
-    if (!cached?.data || typeof cached.cachedAt !== 'number' || !hasRenderableScene(cached.data)) {
-      return null;
-    }
-
-    return {
-      data: cached.data,
-      cachedAt: cached.cachedAt,
-      isFresh: now - cached.cachedAt < CACHE_TTL_MS
-    };
-  } catch {
-    return null;
-  }
-}
-
-function hasRenderableScene(data) {
-  return data?.scene?.lineSegments?.length > 0 && data?.scene?.stationNodes?.length > 0;
-}
-
-function writeCache(storage, data, now) {
-  if (!storage?.setItem) {
-    return;
-  }
-
-  storage.setItem(
-    CACHE_KEY,
-    JSON.stringify({
-      cachedAt: now,
-      data
-    })
-  );
-}
-
 function parseLineString(rawLineString) {
   const parsed = JSON.parse(rawLineString);
 
@@ -326,11 +301,22 @@ function buildLineFeature(lineMeta, coordinates, branchIndex) {
   };
 }
 
+function roundedRouteCoordinateKey([lon, lat]) {
+  return `${lon.toFixed(6)},${lat.toFixed(6)}`;
+}
+
+function routeGeometryKey(coordinates) {
+  const forward = coordinates.map(roundedRouteCoordinateKey).join(';');
+  const reverse = coordinates.slice().reverse().map(roundedRouteCoordinateKey).join(';');
+
+  return forward < reverse ? forward : reverse;
+}
+
 function buildStationFeature(station, lineMeta) {
   return {
     type: 'Feature',
     properties: {
-      stationId: station.stationId ?? station.id,
+      stationId: station.stationId || station.id,
       lineId: lineMeta.id,
       lineName: lineMeta.name,
       name: formatStationName(station.name),
@@ -399,16 +385,6 @@ export function getStationDepthRecord(stationName, lineId) {
 
   if (directRecord || lineId !== 'elizabeth') {
     return directRecord ?? null;
-  }
-
-  const piccadillyRecord = STATION_DEPTHS.get(`${lookupName}|piccadilly`);
-
-  if (piccadillyRecord && lookupName.includes('heathrow')) {
-    return {
-      ...piccadillyRecord,
-      lineId,
-      source: `${DEPTH_SOURCE}; Elizabeth line Heathrow level approximated from same-station Piccadilly platform row`
-    };
   }
 
   const groundRecord = STATION_GROUND_LEVELS.get(lookupName);
@@ -596,6 +572,32 @@ function sharedTrackSectionKey(leftStationId, rightStationId) {
   return [leftStationId, rightStationId].sort().join('|');
 }
 
+function stationEndpointElevations(start, end) {
+  return new Map([
+    [start.stationId, start.elevation],
+    [end.stationId, end.elevation]
+  ]);
+}
+
+function isDepthCompatibleSharedSection(section, start, end) {
+  const candidateElevations = stationEndpointElevations(start, end);
+
+  return section.stationIds.every((stationId) => {
+    const existingElevation = section.elevationsByStationId.get(stationId);
+    const candidateElevation = candidateElevations.get(stationId);
+
+    return Math.abs(existingElevation - candidateElevation) <= SHARED_TRACK_MAX_ELEVATION_GAP_METRES;
+  });
+}
+
+function canShareTrackWithSection(section, lineId) {
+  if (NON_SHARED_LINE_IDS.has(lineId)) {
+    return false;
+  }
+
+  return Array.from(section.lines.keys()).every((existingLineId) => !NON_SHARED_LINE_IDS.has(existingLineId));
+}
+
 function buildSharedTrackSections(lineFeatures, sceneStationNodes) {
   const sectionsByKey = new Map();
 
@@ -618,13 +620,27 @@ function buildSharedTrackSections(lineFeatures, sceneStationNodes) {
       }
 
       const key = sharedTrackSectionKey(start.stationId, end.stationId);
-      const section = sectionsByKey.get(key) ?? {
-        stationIds: [start.stationId, end.stationId].sort(),
+      const stationIds = [start.stationId, end.stationId].sort();
+      const sectionGroups = sectionsByKey.get(key) ?? [];
+      if (NON_SHARED_LINE_IDS.has(feature.properties.lineId)) {
+        continue;
+      }
+
+      const section = sectionGroups.find((candidate) =>
+        canShareTrackWithSection(candidate, feature.properties.lineId) &&
+        isDepthCompatibleSharedSection(candidate, start, end)
+      ) ?? {
+        stationIds,
         stationNamesById: new Map(),
         stationPointsById: new Map(),
+        elevationsByStationId: stationEndpointElevations(start, end),
         lines: new Map(),
         paths: []
       };
+
+      if (!sectionGroups.includes(section)) {
+        sectionGroups.push(section);
+      }
 
       [start, end].forEach((station) => {
         section.stationNamesById.set(station.stationId, station.name);
@@ -652,11 +668,12 @@ function buildSharedTrackSections(lineFeatures, sceneStationNodes) {
         stationIds: [start.stationId, end.stationId],
         points: extractMeasuredPath(feature.geometry.coordinates, start.measureMeters, end.measureMeters)
       });
-      sectionsByKey.set(key, section);
+      sectionsByKey.set(key, sectionGroups);
     }
   });
 
   return Array.from(sectionsByKey.values())
+    .flat()
     .filter((section) => section.lines.size > 1)
     .map((section) => {
       const selectedPath = section.paths
@@ -716,7 +733,8 @@ function buildSceneModel(lineFeatures, stationNodeFeatures) {
 
     return [{
       id: `${feature.properties.stationId}-${feature.properties.lineId}-${index}`,
-      stationId: feature.properties.stationId,
+      stationId: stationGroupId(feature.properties.stationId, feature.properties.name),
+      sourceStationId: feature.properties.stationId,
       name: feature.properties.name,
       lineId: feature.properties.lineId,
       lineName: feature.properties.lineName,
@@ -738,9 +756,10 @@ function buildSceneModel(lineFeatures, stationNodeFeatures) {
     const lineStations = sceneStationNodes
       .filter((node) => node.lineId === feature.properties.lineId)
       .map((node) => ({
-        measureMeters: measureCoordinateOnLine(node.coordinates, feature.geometry.coordinates),
+        ...measureCoordinateOnLineMatch(node.coordinates, feature.geometry.coordinates),
         platformHeightMetres: node.elevation
       }))
+      .filter((node) => node.distanceMeters <= LINE_STATION_BRANCH_MAX_DISTANCE_METRES)
       .sort((left, right) => left.measureMeters - right.measureMeters);
 
     if (lineStations.length === 0) {
@@ -815,14 +834,24 @@ function buildSceneModel(lineFeatures, stationNodeFeatures) {
 export function normaliseRouteSequence(lineMeta, routeSequence) {
   const lineFeatures = [];
   const stationFeaturesById = new Map();
+  const seenRouteGeometries = new Set();
 
   (routeSequence.lineStrings ?? []).forEach((rawLineString, branchIndex) => {
     const segments = parseLineString(rawLineString);
 
     segments.forEach((coordinates) => {
-      if (coordinates.length > 1) {
-        lineFeatures.push(buildLineFeature(lineMeta, coordinates, branchIndex));
+      if (coordinates.length <= 1) {
+        return;
       }
+
+      const geometryKey = routeGeometryKey(coordinates);
+
+      if (seenRouteGeometries.has(geometryKey)) {
+        return;
+      }
+
+      seenRouteGeometries.add(geometryKey);
+      lineFeatures.push(buildLineFeature(lineMeta, coordinates, branchIndex));
     });
   });
 
@@ -831,7 +860,7 @@ export function normaliseRouteSequence(lineMeta, routeSequence) {
       return;
     }
 
-    const stationId = station.stationId ?? station.id;
+    const stationId = station.stationId || station.id;
 
     if (!stationFeaturesById.has(stationId)) {
       stationFeaturesById.set(stationId, buildStationFeature(station, lineMeta));
@@ -973,39 +1002,13 @@ async function fetchFreshNetworkData(fetchImpl) {
 
 export async function fetchNetworkData(options = {}) {
   const {
-    fetchImpl = fetch,
-    storage = globalThis.localStorage,
-    now = Date.now()
+    fetchImpl = fetch
   } = options;
 
-  const cached = readCache(storage, now);
+  const freshData = await fetchFreshNetworkData(fetchImpl);
 
-  if (cached?.isFresh) {
-    return {
-      ...cached.data,
-      source: 'cache',
-      cachedAt: cached.cachedAt
-    };
-  }
-
-  try {
-    const freshData = await fetchFreshNetworkData(fetchImpl);
-    writeCache(storage, freshData, now);
-
-    return {
-      ...freshData,
-      source: 'live',
-      cachedAt: now
-    };
-  } catch (error) {
-    if (cached?.data) {
-      return {
-        ...cached.data,
-        source: 'stale-cache',
-        cachedAt: cached.cachedAt
-      };
-    }
-
-    throw error;
-  }
+  return {
+    ...freshData,
+    source: 'live'
+  };
 }
