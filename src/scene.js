@@ -10,6 +10,9 @@ const MIN_LABEL_DISTANCE = 160;
 const SHARED_ROUTE_STRIPE_LENGTH = 46;
 const SHARED_SECTION_HIDE_DISTANCE = 44;
 const DIMMED_ROUTE_OPACITY = 0.14;
+const KEYBOARD_PAN_DISTANCE_FACTOR = 0.045;
+const KEYBOARD_ZOOM_IN_FACTOR = 0.88;
+const KEYBOARD_ZOOM_OUT_FACTOR = 1.14;
 let stationTexture = null;
 
 const RENDER_QUALITY = {
@@ -41,6 +44,82 @@ function applyViewState(camera, controls, viewState) {
   camera.zoom = viewState.zoom;
   camera.updateProjectionMatrix();
   controls.update();
+}
+
+function distanceFromTarget(camera, controls) {
+  return camera.position.distanceTo(controls.target);
+}
+
+export function applyKeyboardViewAction(camera, controls, action) {
+  const distance = distanceFromTarget(camera, controls);
+
+  if (action === 'zoom-in' || action === 'zoom-out') {
+    const factor = action === 'zoom-in' ? KEYBOARD_ZOOM_IN_FACTOR : KEYBOARD_ZOOM_OUT_FACTOR;
+    const nextDistance = THREE.MathUtils.clamp(
+      distance * factor,
+      controls.minDistance,
+      controls.maxDistance
+    );
+    const direction = camera.position.clone().sub(controls.target).normalize();
+
+    camera.position.copy(controls.target.clone().add(direction.multiplyScalar(nextDistance)));
+    camera.updateProjectionMatrix();
+    controls.update();
+    return;
+  }
+
+  const panDistance = Math.max(24, distance * KEYBOARD_PAN_DISTANCE_FACTOR);
+  const right = new THREE.Vector3().setFromMatrixColumn(camera.matrix, 0).normalize();
+  const up = new THREE.Vector3().setFromMatrixColumn(camera.matrix, 1).normalize();
+  const movement = new THREE.Vector3();
+
+  if (action === 'pan-left') {
+    movement.addScaledVector(right, -panDistance);
+  } else if (action === 'pan-right') {
+    movement.addScaledVector(right, panDistance);
+  } else if (action === 'pan-up') {
+    movement.addScaledVector(up, panDistance);
+  } else if (action === 'pan-down') {
+    movement.addScaledVector(up, -panDistance);
+  } else {
+    return;
+  }
+
+  camera.position.add(movement);
+  controls.target.add(movement);
+  controls.update();
+}
+
+function keyboardViewAction(event) {
+  if (event.shiftKey) {
+    const panActions = {
+      ArrowLeft: 'pan-left',
+      ArrowRight: 'pan-right',
+      ArrowUp: 'pan-up',
+      ArrowDown: 'pan-down'
+    };
+
+    return panActions[event.key] ?? null;
+  }
+
+  if (event.key === '+' || event.key === '=') {
+    return 'zoom-in';
+  }
+
+  if (event.key === '-' || event.key === '_') {
+    return 'zoom-out';
+  }
+
+  return null;
+}
+
+function shouldIgnoreKeyboardEvent(event) {
+  const tagName = event.target?.tagName?.toLowerCase();
+
+  return tagName === 'input' ||
+    tagName === 'select' ||
+    tagName === 'textarea' ||
+    event.target?.isContentEditable;
 }
 
 export function computeProjection(sceneData, options = {}) {
@@ -974,6 +1053,24 @@ export function createScene(container, networkData, options = {}) {
   renderer.domElement.addEventListener('pointerleave', onPointerLeave);
   renderer.domElement.style.cursor = 'grab';
 
+  function onKeyDown(event) {
+    if (shouldIgnoreKeyboardEvent(event)) {
+      return;
+    }
+
+    const action = keyboardViewAction(event);
+
+    if (!action) {
+      return;
+    }
+
+    event.preventDefault();
+    controls.autoRotate = false;
+    applyKeyboardViewAction(camera, controls, action);
+  }
+
+  window.addEventListener('keydown', onKeyDown);
+
   const resizeObserver = new ResizeObserver(() => {
     const width = container.clientWidth;
     const height = container.clientHeight;
@@ -1013,6 +1110,7 @@ export function createScene(container, networkData, options = {}) {
       resizeObserver.disconnect();
       renderer.domElement.removeEventListener('pointermove', onPointerMove);
       renderer.domElement.removeEventListener('pointerleave', onPointerLeave);
+      window.removeEventListener('keydown', onKeyDown);
       controls.dispose();
       disposeSceneResources(scene, renderer, labelRenderer);
       container.innerHTML = '';

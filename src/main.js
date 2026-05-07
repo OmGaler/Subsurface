@@ -7,7 +7,6 @@ const DEFAULT_DISTORTION = {
   horizontalScale: 0.058,
   verticalScale: 4.6
 };
-const TOUR_INTERVAL_MS = 7000;
 const DISTORTION_RENDER_DEBOUNCE_MS = 140;
 
 app.innerHTML = `
@@ -27,10 +26,6 @@ app.innerHTML = `
       <label class="view-control view-control--focus">
         <span>Focus</span>
         <select id="line-focus"></select>
-      </label>
-      <label class="view-control view-control--tour">
-        <input id="tour-mode" type="checkbox">
-        <span>Tour</span>
       </label>
       <label class="distortion-control">
         <span>Horizontal</span>
@@ -55,7 +50,6 @@ const lineStoryKickerEl = document.querySelector('#line-story-kicker');
 const lineStoryTitleEl = document.querySelector('#line-story-title');
 const lineStoryCopyEl = document.querySelector('#line-story-copy');
 const lineFocusEl = document.querySelector('#line-focus');
-const tourModeEl = document.querySelector('#tour-mode');
 const horizontalScaleEl = document.querySelector('#horizontal-scale');
 const horizontalScaleValueEl = document.querySelector('#horizontal-scale-value');
 const verticalScaleEl = document.querySelector('#vertical-scale');
@@ -64,7 +58,6 @@ let sceneHandle = null;
 let networkDataCache = null;
 let renderFrameId = 0;
 let renderTimerId = 0;
-let tourTimerId = 0;
 let lineOptions = [];
 let activeLineId = 'all';
 let preserveViewOnNextRender = true;
@@ -211,38 +204,6 @@ function setActiveLine(lineId, options = {}) {
   queueRenderScene();
 }
 
-function stopTour() {
-  window.clearInterval(tourTimerId);
-  tourTimerId = 0;
-  tourModeEl.checked = false;
-}
-
-function advanceTour() {
-  if (lineOptions.length === 0) {
-    return;
-  }
-
-  const currentIndex = lineOptions.findIndex((line) => line.id === activeLineId);
-  const nextIndex = currentIndex >= 0 ? (currentIndex + 1) % lineOptions.length : 0;
-
-  setActiveLine(lineOptions[nextIndex].id, { preserveView: false });
-}
-
-function syncTourMode() {
-  window.clearInterval(tourTimerId);
-  tourTimerId = 0;
-
-  if (!tourModeEl.checked) {
-    return;
-  }
-
-  if (activeLineId === 'all') {
-    advanceTour();
-  }
-
-  tourTimerId = window.setInterval(advanceTour, TOUR_INTERVAL_MS);
-}
-
 function syncScaleControl(rangeInput, numberInput, rawValue) {
   const value = clampControlValue(rangeInput, rawValue);
   const displayValue = String(value);
@@ -279,8 +240,6 @@ async function boot() {
 bindScaleControl(horizontalScaleEl, horizontalScaleValueEl);
 bindScaleControl(verticalScaleEl, verticalScaleValueEl);
 lineFocusEl.addEventListener('change', () => {
-  stopTour();
   setActiveLine(lineFocusEl.value, { preserveView: false });
 });
-tourModeEl.addEventListener('change', syncTourMode);
 boot();

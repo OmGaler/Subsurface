@@ -1,5 +1,7 @@
 import { describe, expect, it } from 'vitest';
+import * as THREE from 'three';
 import {
+  applyKeyboardViewAction,
   buildUniqueLineRuns,
   computeProjection,
   selectLabelGroups,
@@ -34,6 +36,53 @@ describe('computeProjection', () => {
     expect(distorted.x).toBeCloseTo(base.x * 2);
     expect(distorted.z).toBeCloseTo(base.z * 2);
     expect(distorted.y).toBeCloseTo(base.y * 3);
+  });
+});
+
+describe('applyKeyboardViewAction', () => {
+  function createCameraControls() {
+    const camera = new THREE.PerspectiveCamera(26, 1, 1, 18000);
+    camera.position.set(0, 120, 1000);
+    camera.lookAt(0, 120, 0);
+    camera.updateMatrixWorld();
+
+    const controls = {
+      target: new THREE.Vector3(0, 120, 0),
+      minDistance: 420,
+      maxDistance: 18000,
+      update() {
+        camera.lookAt(this.target);
+        camera.updateMatrixWorld();
+      }
+    };
+
+    return { camera, controls };
+  }
+
+  it('pans the camera and target together for keyboard arrows', () => {
+    const { camera, controls } = createCameraControls();
+    const startCamera = camera.position.clone();
+    const startTarget = controls.target.clone();
+
+    applyKeyboardViewAction(camera, controls, 'pan-right');
+
+    expect(camera.position.x).toBeGreaterThan(startCamera.x);
+    expect(controls.target.x).toBeGreaterThan(startTarget.x);
+    expect(camera.position.clone().sub(controls.target)).toEqual(startCamera.sub(startTarget));
+  });
+
+  it('zooms towards and away from the target with keyboard controls', () => {
+    const { camera, controls } = createCameraControls();
+    const startDistance = camera.position.distanceTo(controls.target);
+
+    applyKeyboardViewAction(camera, controls, 'zoom-in');
+    const zoomedInDistance = camera.position.distanceTo(controls.target);
+
+    applyKeyboardViewAction(camera, controls, 'zoom-out');
+    const zoomedOutDistance = camera.position.distanceTo(controls.target);
+
+    expect(zoomedInDistance).toBeLessThan(startDistance);
+    expect(zoomedOutDistance).toBeGreaterThan(zoomedInDistance);
   });
 });
 

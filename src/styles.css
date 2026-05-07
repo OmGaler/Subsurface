@@ -232,18 +232,6 @@ body {
   grid-template-columns: 5.5rem minmax(0, 1fr);
 }
 
-.view-control--tour {
-  grid-template-columns: auto 1fr;
-  justify-content: start;
-}
-
-.view-control--tour input {
-  width: 1rem;
-  height: 1rem;
-  margin: 0;
-  accent-color: #181817;
-}
-
 .view-control select {
   min-width: 0;
   border: 1px solid var(--card-border);
@@ -353,10 +341,6 @@ body {
 
   .view-control--focus {
     grid-template-columns: 4.6rem minmax(0, 1fr);
-  }
-
-  .view-control--tour {
-    grid-template-columns: auto 1fr;
   }
 
   .hover-card__title {
