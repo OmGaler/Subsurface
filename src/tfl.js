@@ -9,7 +9,7 @@ const LINE_STATION_BRANCH_MAX_DISTANCE_METRES = 75;
 const SHARED_TRACK_MAX_ELEVATION_GAP_METRES = 7;
 const NETWORK_CACHE_KEY = 'subsurface.network.v1';
 const NETWORK_CACHE_MAX_AGE_MS = 1000 * 60 * 60 * 24 * 7;
-const STATIC_NETWORK_CACHE_URL = '/network-cache.json';
+const STATIC_NETWORK_CACHE_URL = `${import.meta.env.BASE_URL}network-cache.json`;
 const NON_SHARED_LINE_IDS = new Set(['elizabeth']);
 
 const CSV_LINE_NAMES = {
